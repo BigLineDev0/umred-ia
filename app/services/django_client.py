@@ -61,3 +61,17 @@ async def get_creneaux_occupes(token: str, equipement_id: int, date_debut: str, 
         )
         resp.raise_for_status()
         return resp.json()
+    
+    
+async def get_toutes_maintenances(token: str) -> list[dict]:
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{settings.django_api_url}/maintenances/", headers={"Authorization": f"Bearer {token}"})
+        resp.raise_for_status()
+        return resp.json()
+
+async def get_reservations_stats(token: str, tous: bool = False) -> list[dict]:
+    params = {"all": "true"} if tous else {}
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{settings.django_api_url}/reservations/", params=params, headers={"Authorization": f"Bearer {token}"})
+        resp.raise_for_status()
+        return resp.json()

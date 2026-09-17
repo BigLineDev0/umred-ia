@@ -21,3 +21,19 @@ def normaliser_date(date_brute: str | None) -> str | None:
     if not resultat:
         return None
     return resultat.strftime("%Y-%m-%d")
+
+
+VALEURS_NULLES = {"null", "none", "n/a", "aucun", "aucune", ""}
+
+
+def nettoyer_extraction(extraction: dict) -> dict:
+    """
+    Les petits modèles hallucinent parfois la CHAÎNE "null" plutôt que
+    le vrai null JSON. Sans ce nettoyage, "null" (texte) est considéré
+    comme une valeur présente par nos vérifications de slots manquants.
+    """
+    for cle in ["equipement", "date", "heure_debut", "heure_fin"]:
+        valeur = extraction.get(cle)
+        if isinstance(valeur, str) and valeur.strip().lower() in VALEURS_NULLES:
+            extraction[cle] = None
+    return extraction

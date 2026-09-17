@@ -8,14 +8,17 @@ from app.nlu.extractor import extraire_intention
 from app.services.django_client import (
     get_equipements, creer_reservation, get_mes_reservations,
     annuler_reservation, get_maintenances, get_creneaux_occupes,
+    get_reservations_stats, get_toutes_maintenances
 )
 from app.services.matching import resoudre_equipement
 from app.services.disponibilite import calculer_creneaux_libres, jours_de_la_periode
 
 from app.nlu.conversation import repondre_conversationnel
-from app.nlu.normalisation import normaliser_date
+from app.nlu.normalisation import normaliser_date, nettoyer_extraction
+from app.nlu.domaine import concerne_le_labo
 
 LABELS_ROLE = {"ADMIN": "administrateur", "TECHNICIEN": "technicien", "CHERCHEUR": "enseignant-chercheur", "ETUDIANT": "étudiant"}
+ROLES_SUPERVISEURS = ["ADMIN", "TECHNICIEN", "CHERCHEUR"]
 
 router = APIRouter()
 
@@ -25,33 +28,47 @@ router = APIRouter()
 
 async def chat(payload: ChatRequest, token: str = Depends(get_bearer_token), user=Depends(get_current_user)):
     session = get_session(payload.session_id)
-    
+    message_brut = payload.message.strip()
+    message_lower = message_brut.lower()
 
-    # --- Confirmation en attente (réservation OU annulation) ---
     if session.get("attente_confirmation"):
-        reponse_positive = payload.message.strip().lower() in ["oui", "yes", "confirme"]
         action = session.get("action_en_attente")
-        update_session(payload.session_id, attente_confirmation=False)
 
-        if not reponse_positive:
+        if message_lower in ["oui", "yes", "confirme", "confirmer"]:
+            update_session(payload.session_id, attente_confirmation=False)
+            if action == "creer_reservation":
+                resultat = await creer_reservation(token, session["reservation_prete"])
+                if "erreur" in resultat:
+                    return ChatResponse(reponse=f"Je n'ai pas pu créer la réservation : {resultat['erreur']}")
+                return ChatResponse(reponse="C'est confirmé, votre réservation a bien été enregistrée.")
+            if action == "annuler_reservation":
+                resultat = await annuler_reservation(token, session["reservation_id_a_annuler"])
+                if "erreur" in resultat:
+                    return ChatResponse(reponse="Je n'ai pas pu annuler cette réservation.")
+                return ChatResponse(reponse="Votre réservation a bien été annulée.")
+
+        elif message_lower in ["non", "no", "annule", "annuler"]:
+            update_session(payload.session_id, attente_confirmation=False)
             return ChatResponse(reponse="D'accord, j'annule cette demande.")
 
-        if action == "creer_reservation":
-            resultat = await creer_reservation(token, session["reservation_prete"])
-            if "erreur" in resultat:
-                return ChatResponse(reponse=f"Je n'ai pas pu créer la réservation : {resultat['erreur']}")
-            return ChatResponse(reponse="C'est confirmé, votre réservation a bien été enregistrée.")
+        else:
+            # Le message ne répond ni "oui" ni "non" à la confirmation en
+            # attente : on l'abandonne plutôt que de l'imposer comme un
+            # refus implicite, et on traite ce message comme une VRAIE
+            # nouvelle demande — pas de continuation, pas de return ici.
+            update_session(payload.session_id, attente_confirmation=False)
 
-        if action == "annuler_reservation":
-            resultat = await annuler_reservation(token, session["reservation_id_a_annuler"])
-            if "erreur" in resultat:
-                return ChatResponse(reponse="Je n'ai pas pu annuler cette réservation.")
-            return ChatResponse(reponse="Votre réservation a bien été annulée.")
-
-    extraction = await extraire_intention(payload.message)
+    extraction = await extraire_intention(message_brut)
+    extraction = nettoyer_extraction(extraction)
     extraction["date"] = normaliser_date(extraction.get("date"))
     intention = extraction.get("intention")
-    
+
+    # Verrou déterministe pour les statistiques : peu importe ce que
+    # l'extraction du LLM a renvoyé, "combien"/"statistique" porte
+    # toujours sur un comptage — jamais laissé retomber sur le menu.
+    if intention not in ["reserver", "annuler"] and any(m in message_lower for m in ["combien", "statistique", "nombre de"]):
+        intention = "statistiques"
+
     if intention == "salutation":
         prenom = user.get("prenom")
         return ChatResponse(reponse=f"Bonjour {prenom} 👋 Comment puis-je vous aider aujourd'hui ?" if prenom else "Bonjour 👋 Comment puis-je vous aider ?")
@@ -100,10 +117,24 @@ async def chat(payload: ChatRequest, token: str = Depends(get_bearer_token), use
 
     # --- Statistiques ---
     if intention == "statistiques":
-        reservations = await get_mes_reservations(token)
+        # retire cette ligne : message_lower = payload.message.lower()
+        demande_globale = user["role"] in ROLES_SUPERVISEURS and any(
+            m in message_lower for m in ["tous les utilisateurs", "au total", "toute la plateforme", "de la plateforme"]
+        )
+
+        if "maintenance" in message_lower:
+            maintenances = await get_toutes_maintenances(token)
+            return ChatResponse(reponse=f"{len(maintenances)} intervention(s) de maintenance enregistrée(s) au total.")
+
+        if "équipement" in message_lower or "equipement" in message_lower:
+            equipements = await get_equipements(token)
+            return ChatResponse(reponse=f"{len(equipements)} équipement(s) référencé(s) sur la plateforme.")
+
+        reservations = await get_reservations_stats(token, tous=demande_globale)
         mois_courant = date.today().strftime("%Y-%m")
         count = len([r for r in reservations if r["date"].startswith(mois_courant)])
-        return ChatResponse(reponse=f"Vous avez effectué {count} réservation(s) ce mois-ci.")
+        portee = "sur la plateforme" if demande_globale else "personnellement"
+        return ChatResponse(reponse=f"{count} réservation(s) effectuée(s) {portee} ce mois-ci.")
 
     # --- Disponibilité (jour ou semaine) ---
     if intention == "consulter_disponibilite":
@@ -124,8 +155,21 @@ async def chat(payload: ChatRequest, token: str = Depends(get_bearer_token), use
             return ChatResponse(reponse="Seuls les administrateurs et techniciens peuvent ajouter un équipement.")
         return ChatResponse(reponse="Pour ajouter un équipement, rendez-vous sur la page Équipements puis cliquez sur « Nouvel équipement » — le formulaire vous guidera pour renseigner le numéro de série et le laboratoire.")
 
-    return ChatResponse(reponse=await repondre_conversationnel(payload.message))
-
+    if concerne_le_labo(payload.message):
+        # Le message parle bien du laboratoire, mais aucune intention précise
+        # n'a été reconnue — on ne laisse JAMAIS le LLM répondre librement
+        # sur ce sujet (il n'a accès à aucune donnée réelle et pourrait en
+        # inventer). On propose un menu clair à la place.
+        return ChatResponse(reponse=(
+            "Je ne suis pas certain de bien comprendre votre demande. Voici ce que je peux faire :\n"
+            "- Réserver un équipement\n"
+            "- Consulter vos réservations\n"
+            "- Annuler une réservation\n"
+            "- Vous informer sur une maintenance ou une disponibilité"
+        ))
+        
+    return ChatResponse(reponse=await repondre_conversationnel(payload.message))  
+   
 
 async def _gerer_reservation(payload, token, extraction) -> ChatResponse:
     slots_manquants = [c for c in ["equipement", "date", "heure_debut", "heure_fin"] if not extraction.get(c)]
@@ -147,7 +191,7 @@ async def _gerer_reservation(payload, token, extraction) -> ChatResponse:
     }
     update_session(payload.session_id, attente_confirmation=True, action_en_attente="creer_reservation", reservation_prete=reservation_prete)
     return ChatResponse(
-        reponse=f"{equipement['nom']} — confirmez-vous la réservation du {extraction['date']} de {extraction['heure_debut']} à {extraction['heure_fin']} ?",
+        reponse=f"{equipement['nom']} disponible : confirmez-vous la réservation du {extraction['date']} de {extraction['heure_debut']} à {extraction['heure_fin']} ?",
         necessite_confirmation=True,
     )
 
@@ -172,3 +216,5 @@ async def _gerer_annulation(payload, token, extraction) -> ChatResponse:
         reponse=f"Confirmez-vous l'annulation de la réservation du {reservation['date']} à {reservation['heure_debut'][:5]} ({reservation['laboratoire_nom']}) ?",
         necessite_confirmation=True,
     )
+  
+  
