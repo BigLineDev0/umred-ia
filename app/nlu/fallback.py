@@ -4,11 +4,12 @@ from dateparser.search import search_dates
 
 INTENTIONS = {
     "reserver": ["réserve", "réserver", "réservation de", "je veux réserver", "prendre le"],
-    "annuler": ["annule", "annuler"],
+    "annuler": ["annule", "annuler", "dernière", "derniere"],
     "consulter_mes_reservations": ["mes réservations", "mes demandes", "prochaines réservations"],
-    "consulter_disponibilite": ["disponible", "disponibilité", "libre", "créneaux"],
+    "consulter_disponibilite": ["disponible", "disponibilité", "libre", "créneaux", "quels équipements sont disponibles"],
     "maintenance": ["prochaine maintenance", "maintenance de", "maintenance du"],
     "statistiques": ["combien", "statistique", "nombre de"],
+    "mode_emploi": ["comment utiliser", "mode d'emploi", "notice"],
     "creer_equipement": ["ajoute un équipement", "ajouter un équipement", "créer un équipement", "nouvel équipement"],
     "mon_nom": ["comment je m'appelle", "qui suis-je", "mon nom"],
     "identite": ["qui es-tu", "qui es tu", "tu es qui", "qui t'a créé", "qui t'a cree", "que peux-tu faire", "es-tu un robot"],
@@ -31,6 +32,10 @@ def _extraire_heures(message: str) -> tuple[str | None, str | None]:
     heure_debut = heures[0] if len(heures) >= 1 else None
     heure_fin = heures[1] if len(heures) >= 2 else None
     return heure_debut, heure_fin
+
+def extraire_heures_seules(message: str) -> tuple[str | None, str | None]:
+    """Exposée pour être réutilisée hors du pipeline d'extraction complet — notamment quand l'utilisateur ne répond qu'avec un horaire, sans reformuler toute sa demande."""
+    return _extraire_heures(message)
 
 def _extraire_periode(message_lower: str) -> str:
     if "semaine" in message_lower:
