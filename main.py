@@ -1,28 +1,42 @@
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
-from fastapi.params import Depends
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.core.config import settings
+from app.nlu.model import charger_modele, modele_disponible
 from app.routes.chat import router as chat_router
-from app.core.security import get_current_user
+from app.services.django_client import fermer_client
 
-app = FastAPI(title="UMRED Labo — Service IA", version="1.0.0")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s : %(message)s")
 
-# -- CORS
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Chargement du modèle dans un thread : plusieurs secondes de calcul
+    # qui ne doivent pas bloquer la boucle d'événements au démarrage.
+    await asyncio.to_thread(charger_modele)
+    yield
+    await fermer_client()
+
+
+app = FastAPI(title="UMRED Labo — Service IA", version="1.1.0", lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "django_api_url": settings.django_api_url}
+    # Aucune information interne (URL de Django, versions...) n'est exposée.
+    return {"status": "ok", "modele": "charge" if modele_disponible() else "mode_degrade"}
 
-
-@app.get("/me")
-def me(user_id: int = Depends(get_current_user)):
-    return {"user_id": user_id}
 
 app.include_router(chat_router, prefix="/api")
