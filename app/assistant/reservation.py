@@ -1,9 +1,9 @@
 """
 Parcours de réservation, étape par étape :
 
-    demande ──► COLLECTE (infos manquantes ?) ──► SELECTION_EQUIPEMENT (ambiguïté ?)
-            ──► CONFIRMATION ──► envoi à Django ──► succès
-                                                 └► conflit 409 ──► SELECTION_ALTERNATIVE ──► CONFIRMATION
+    demande -> COLLECTE (infos manquantes ?) -> SELECTION_EQUIPEMENT (ambiguïté ?)
+            -> CONFIRMATION ─> envoi à Django -> succès
+                                                 └> conflit 409 ─> SELECTION_ALTERNATIVE ──> CONFIRMATION
 
 Le « brouillon » est la demande en cours de construction : il survit
 d'un message à l'autre, ce qui permet à l'utilisateur de compléter sa
@@ -285,26 +285,28 @@ async def _finaliser_reservation(ctx: Contexte) -> ChatResponse:
 
 def _proposer_alternatives(ctx: Contexte, reservation: dict, equipements: list[dict], conflit: dict) -> ChatResponse:
     alternatives = conflit.get("alternatives") or {}
-    memes = alternatives.get("memes_equipements", [])
-    # Un équipement équivalent ne remplace proprement qu'une réservation
-    # d'UN seul équipement ; pour plusieurs, on ne saurait pas lequel remplacer.
-    equivalents = alternatives.get("equipements_equivalents", []) if len(equipements) == 1 else []
+    # Créneaux libres pour TOUS les équipements demandés, classés par
+    # proximité avec l'heure voulue ; chacun porte un message explicatif
+    # (« disponible à partir de 11h00 »).
+    memes = alternatives.get("creneaux", [])
+    # Chaque équivalent indique l'équipement qu'il remplace ('remplace').
+    equivalents = alternatives.get("equipements_equivalents", [])
 
     lignes = ["Ce créneau est déjà pris."]
-    if conflit.get("priorite_superieure"):
-        lignes.append("Votre demande étant prioritaire, les techniciens ont été alertés du conflit.")
+    for c in conflit.get("conflits", []):
+        lignes.append(f"- {c['equipement']} est réservé de {formater_plage(c['heure_debut'], c['heure_fin'])}")
 
     options = []
     if memes:
-        lignes.append("\nAutres créneaux disponibles :")
+        lignes.append("\nCréneaux proposés :")
         for i, alt in enumerate(memes):
             quand = f"{formater_date(alt['date'])} {formater_plage(alt['heure_debut'], alt['heure_fin'])}"
-            lignes.append(f"- {alt.get('equipement', '')} : {quand}")
+            lignes.append(f"- {alt.get('message') or quand}")
             options.append(ChatOption(label=quand, value=f"alt_{i}"))
     if equivalents:
         lignes.append("\nÉquipements équivalents libres au même moment :")
         for equiv in equivalents:
-            lignes.append(f"- {equiv['nom']}")
+            lignes.append(f"- {equiv['nom']}" + (f" (à la place de {equiv['remplace_nom']})" if equiv.get('remplace_nom') else ""))
             options.append(ChatOption(label=equiv["nom"], value=f"equiv_{equiv['id']}"))
 
     if not options:
@@ -331,9 +333,13 @@ async def traiter_selection_alternative(ctx: Contexte) -> ChatResponse | None:
     identifiant = lire_choix(ctx.message_normalise, "equiv")
     equiv = next((e for e in etape["equivalents"] if e["id"] == identifiant), None) if identifiant is not None else None
     if equiv:
-        # Django garantit que l'équivalent est dans le même laboratoire.
+        # Django garantit que l'équivalent est dans le même laboratoire. Il
+        # ne remplace que l'équipement en conflit ; le reste de la sélection
+        # est conservé.
         remplacant = {**equiv, "laboratoire": reservation["laboratoire"], "laboratoire_nom": equipements[0].get("laboratoire_nom")}
-        return await proposer_confirmation(ctx, creneau, [remplacant])
+        remplace = equiv.get("remplace", equipements[0]["id"])
+        nouveaux = [remplacant if e["id"] == remplace else e for e in equipements]
+        return await proposer_confirmation(ctx, creneau, nouveaux)
     return None
 
 

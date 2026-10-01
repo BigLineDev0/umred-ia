@@ -144,11 +144,31 @@ async def get_reservations(token: str, *, tous: bool = False, a_venir: bool = Fa
     return await _lire("/reservations/", token, params=params)
 
 
+# Seules les réservations acquises occupent un créneau : une demande en
+# attente ne bloque personne (Django départage la file à la validation).
+STATUTS_BLOQUANTS = {"VALIDEE", "TERMINEE"}
+
+
 async def get_creneaux_occupes(token: str, equipement_id: int, date_debut: str, date_fin: str) -> list[dict]:
-    return await _lire(
+    creneaux = await _lire(
         "/reservations/creneaux_occupes/", token,
         params={"equipement": equipement_id, "date_debut": date_debut, "date_fin": date_fin},
     )
+    return [c for c in creneaux if c.get("statut", "VALIDEE") in STATUTS_BLOQUANTS]
+
+
+async def get_horaires(token: str) -> tuple[str, str] | None:
+    """
+    Horaires d'ouverture configurés par l'établissement (SaaS : chacun a
+    les siens). Information de confort : en cas d'échec, l'appelant garde
+    les horaires par défaut.
+    """
+    try:
+        organisation = await _lire("/organisations/courante/", token)
+        return organisation["heure_ouverture"][:5], organisation["heure_fermeture"][:5]
+    except Exception:
+        logger.warning("Horaires de l'établissement indisponibles : horaires par défaut utilisés.")
+        return None
 
 
 async def creer_reservation(token: str, payload: dict) -> ResultatAction:
@@ -168,3 +188,11 @@ async def get_maintenances(token: str, *, equipement_id: int | None = None, stat
     if statut:
         params["statut"] = statut
     return await _lire("/maintenances/", token, params=params)
+
+
+# --- Pilotage ---
+
+async def get_indicateurs(token: str, date_debut: str | None = None, date_fin: str | None = None) -> dict:
+    """Indicateurs d'aide à la décision ; Django vérifie que l'utilisateur y a droit."""
+    params = {k: v for k, v in {"date_debut": date_debut, "date_fin": date_fin}.items() if v}
+    return await _lire("/pilotage/indicateurs/", token, params=params)

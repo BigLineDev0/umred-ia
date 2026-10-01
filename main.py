@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.nlu.model import charger_modele, modele_disponible
 from app.routes.chat import router as chat_router
+from app.routes.pilotage import router as pilotage_router
 from app.services.django_client import fermer_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s : %(message)s")
@@ -40,3 +41,4 @@ def health_check():
 
 
 app.include_router(chat_router, prefix="/api")
+app.include_router(pilotage_router, prefix="/api")

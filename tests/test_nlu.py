@@ -87,12 +87,18 @@ def test_creneaux_libres():
     occupes = [{"date": "2026-10-01", "heure_debut": "09:00:00", "heure_fin": "10:00:00"},
                {"date": "2026-10-01", "heure_debut": "09:30:00", "heure_fin": "12:00:00"}]
     libres = calculer_creneaux_libres(occupes, ["2026-10-01"], maintenant=datetime(2026, 9, 27, 8))
-    assert libres["2026-10-01"] == [("08:00", "09:00"), ("12:00", "20:00")]
+    assert libres["2026-10-01"] == [("08:00", "09:00"), ("12:00", "19:00")]
 
 
 def test_creneaux_libres_aujourd_hui_ne_propose_pas_le_passe():
     libres = calculer_creneaux_libres([], ["2026-09-27"], maintenant=datetime(2026, 9, 27, 15, 30))
-    assert libres["2026-09-27"] == [("15:30", "20:00")]
+    assert libres["2026-09-27"] == [("15:30", "19:00")]
+
+
+def test_creneaux_libres_selon_les_horaires_de_l_etablissement():
+    libres = calculer_creneaux_libres([], ["2026-10-01"], maintenant=datetime(2026, 9, 27, 8),
+                                      ouverture="07:30", fermeture="17:00")
+    assert libres["2026-10-01"] == [("07:30", "17:00")]
 
 
 def test_chevauchement():

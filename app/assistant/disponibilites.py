@@ -8,7 +8,7 @@ from app.core.constantes import STATUTS_EQUIPEMENT_NON_RESERVABLES
 from app.core.session_store import Etape, definir_etape
 from app.schemas.chat import ChatOption, ChatResponse
 from app.services.disponibilite import calculer_creneaux_libres, jours_de_la_periode
-from app.services.django_client import get_creneaux_occupes, get_equipements
+from app.services.django_client import get_creneaux_occupes, get_equipements, get_horaires
 from app.services.matching import resoudre_equipement
 
 NOMBRE_MAX_EQUIPEMENTS_AFFICHES = 8  # au-delà, la réponse devient illisible dans une bulle de chat
@@ -17,6 +17,11 @@ APPELS_DJANGO_SIMULTANES = 5          # parallélisme borné pour ne pas saturer
 
 def _formater_creneaux(creneaux: list[tuple[str, str]]) -> str:
     return ", ".join(f"{formater_heure(d)}–{formater_heure(f)}" for d, f in creneaux) or "aucun créneau libre"
+
+
+async def _horaires(ctx: Contexte) -> dict:
+    horaires = await get_horaires(ctx.token)
+    return {"ouverture": horaires[0], "fermeture": horaires[1]} if horaires else {}
 
 
 async def consulter_disponibilite(ctx: Contexte) -> ChatResponse:
@@ -39,7 +44,7 @@ async def _disponibilites_equipement(ctx: Contexte, equipement: dict) -> ChatRes
     # jours si l'utilisateur a parlé de « semaine ».
     jours = [ext.date] if ext.date else jours_de_la_periode(ext.periode)
     occupes = await get_creneaux_occupes(ctx.token, equipement["id"], jours[0], jours[-1])
-    libres = calculer_creneaux_libres(occupes, jours)
+    libres = calculer_creneaux_libres(occupes, jours, **await _horaires(ctx))
     lignes = [f"- {formater_date(j)} : {_formater_creneaux(c)}" for j, c in libres.items()]
 
     options = None
@@ -60,11 +65,12 @@ async def _lister_equipements_disponibles(ctx: Contexte, equipements: list[dict]
     # proposé, quel que soit son planning.
     reservables = [e for e in equipements if e.get("statut") not in STATUTS_EQUIPEMENT_NON_RESERVABLES]
     limite = asyncio.Semaphore(APPELS_DJANGO_SIMULTANES)
+    horaires = await _horaires(ctx)
 
     async def creneaux_libres(e: dict) -> list[tuple[str, str]]:
         async with limite:
             occupes = await get_creneaux_occupes(ctx.token, e["id"], date_iso, date_iso)
-        return calculer_creneaux_libres(occupes, [date_iso])[date_iso]
+        return calculer_creneaux_libres(occupes, [date_iso], **horaires)[date_iso]
 
     tous_les_creneaux = await asyncio.gather(*(creneaux_libres(e) for e in reservables))
     disponibles = [(e, c) for e, c in zip(reservables, tous_les_creneaux) if c]

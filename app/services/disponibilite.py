@@ -2,14 +2,16 @@ from datetime import date, datetime, timedelta
 
 from app.services.django_client import get_creneaux_occupes
 
-# Hypothèse assumée : les laboratoires sont ouverts de 8h à 20h. À remplacer
-# le jour où Django exposera de vrais horaires d'ouverture par laboratoire.
+# Horaires par défaut, identiques à ceux de Django (Organisation) ; les
+# horaires réels de l'établissement sont lus via get_horaires() quand ils
+# sont disponibles.
 HEURE_OUVERTURE = "08:00"
-HEURE_FERMETURE = "20:00"
+HEURE_FERMETURE = "19:00"
 
 
 def calculer_creneaux_libres(
-    occupes: list[dict], jours: list[str], maintenant: datetime | None = None
+    occupes: list[dict], jours: list[str], maintenant: datetime | None = None,
+    ouverture: str = HEURE_OUVERTURE, fermeture: str = HEURE_FERMETURE,
 ) -> dict[str, list[tuple[str, str]]]:
     """
     Calcul par différence (« balayage ») : pour chaque jour on part de
@@ -33,15 +35,15 @@ def calculer_creneaux_libres(
             resultat[jour] = []
             continue
         occupes_du_jour = sorted((o for o in occupes if str(o["date"]) == jour), key=lambda o: o["heure_debut"])
-        curseur = max(HEURE_OUVERTURE, heure_actuelle) if jour == aujourd_hui else HEURE_OUVERTURE
+        curseur = max(ouverture, heure_actuelle) if jour == aujourd_hui else ouverture
         libres = []
         for creneau in occupes_du_jour:
             debut, fin = creneau["heure_debut"][:5], creneau["heure_fin"][:5]
             if debut > curseur:
-                libres.append((curseur, min(debut, HEURE_FERMETURE)))
+                libres.append((curseur, min(debut, fermeture)))
             curseur = max(curseur, fin)
-        if curseur < HEURE_FERMETURE:
-            libres.append((curseur, HEURE_FERMETURE))
+        if curseur < fermeture:
+            libres.append((curseur, fermeture))
         resultat[jour] = [(d, f) for d, f in libres if d < f]
     return resultat
 

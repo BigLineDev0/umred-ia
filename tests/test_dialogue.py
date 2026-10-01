@@ -59,9 +59,11 @@ def test_date_passee_refusee(envoyer, django):
 
 def test_conflit_propose_des_alternatives(envoyer, django):
     django.reponse_creation = (409, {
-        "conflit": True, "priorite_superieure": False,
-        "alternatives": {"memes_equipements": [{"equipement": "Centrifugeuse Eppendorf", "date": DEMAIN,
-                                                "heure_debut": "16:00", "heure_fin": "18:00"}],
+        "conflit": True,
+        "conflits": [{"equipement_id": 1, "equipement": "Centrifugeuse Eppendorf",
+                      "heure_debut": "14:00", "heure_fin": "16:00"}],
+        "alternatives": {"creneaux": [{"date": DEMAIN, "heure_debut": "16:00", "heure_fin": "18:00",
+                                       "type": "plus_tard", "message": "Le créneau sera disponible à partir de 16h00"}],
                          "equipements_equivalents": []},
     })
     envoyer("Réserve la centrifugeuse demain de 14h à 16h")
