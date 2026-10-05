@@ -42,6 +42,14 @@ class Settings(BaseSettings):
     session_ttl_minutes: int = 30
     session_max: int = 5000
 
+    @field_validator("huggingface_api_key")
+    @classmethod
+    def _cle_vide_ignoree(cls, valeur: str | None) -> str | None:
+        # « HUGGINGFACE_API_KEY= » (vide, comme dans .env.example) donnait un
+        # en-tête « Authorization: Bearer » invalide et empêchait le
+        # téléchargement du modèle : une clé vide équivaut à aucune clé.
+        return valeur.strip() or None if valeur is not None else None
+
     @field_validator("django_api_url")
     @classmethod
     def _sans_slash_final(cls, valeur: str) -> str:

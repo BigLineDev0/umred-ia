@@ -274,9 +274,9 @@ async def _finaliser_reservation(ctx: Contexte) -> ChatResponse:
     # Le statut initial est décidé par Django (règles de gestion) : un
     # étudiant ou un équipement sensible passe par une validation humaine.
     if resultat.data.get("statut") == "EN_ATTENTE":
-        return ChatResponse(reponse=f"Votre demande pour {quand} est enregistrée."
+        return ChatResponse(reponse=f"Votre demande pour {quand} est enregistrée. "
                                     "Elle est en attente de validation par un responsable : vous serez notifié de sa décision.")
-    return ChatResponse(reponse=f"C'est confirmé Votre réservation pour {quand} est validée.")
+    return ChatResponse(reponse=f"C'est confirmé ! Votre réservation pour {quand} est validée.")
 
 
 # ---------------------------------------------------------------------------

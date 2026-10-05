@@ -44,3 +44,13 @@ def test_synthese_du_modele_acceptee(monkeypatch):
 def test_modele_indisponible(monkeypatch):
     monkeypatch.setattr(synthese, "modele_disponible", lambda: False)
     assert asyncio.run(synthese.rediger_synthese(INDICATEURS))[1] == "regles"
+
+
+def test_indicateurs_incomplets_repli_sur_les_regles(monkeypatch):
+    async def generer_inutile(*_args, **_kwargs):
+        raise AssertionError("Le modèle ne doit pas être appelé sans faits complets.")
+
+    monkeypatch.setattr(synthese, "modele_disponible", lambda: True)
+    monkeypatch.setattr(synthese, "generer", generer_inutile)
+    texte, source = asyncio.run(synthese.rediger_synthese({"synthese_regles": "Synthèse par règles."}))
+    assert (texte, source) == ("Synthèse par règles.", "regles")

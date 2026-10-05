@@ -32,4 +32,4 @@ async def synthese(
         raise HTTPException(status_code=code, detail=exc.detail)
 
     texte, source = await rediger_synthese(indicateurs)
-    return SyntheseResponse(synthese=texte, source=source, periode=indicateurs["periode"])
+    return SyntheseResponse(synthese=texte, source=source, periode=indicateurs.get("periode") or {})

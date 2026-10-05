@@ -64,7 +64,12 @@ async def rediger_synthese(indicateurs: dict) -> tuple[str, str]:
     if not modele_disponible():
         return repli, "regles"
 
-    faits = _faits(indicateurs)
+    try:
+        faits = _faits(indicateurs)
+    except (KeyError, TypeError):
+        # Format inattendu des indicateurs Django : la version par règles reste exacte.
+        logger.warning("Indicateurs incomplets : synthèse rédigée par les règles.")
+        return repli, "regles"
     messages = [
         {"role": "system", "content": CONSIGNES},
         {"role": "user", "content": json.dumps(faits, ensure_ascii=False)},

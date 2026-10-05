@@ -16,10 +16,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Chargement du modèle dans un thread : plusieurs secondes de calcul
-    # qui ne doivent pas bloquer la boucle d'événements au démarrage.
-    await asyncio.to_thread(charger_modele)
+    # Chargement du modèle en ARRIÈRE-PLAN : au premier démarrage il faut
+    # télécharger ~3 Go, et le service doit répondre pendant ce temps. Tant
+    # que le modèle n'est pas prêt, modele_disponible() vaut False et
+    # l'assistant fonctionne avec les règles (mode dégradé), puis bascule
+    # automatiquement sur le modèle une fois chargé.
+    chargement = asyncio.create_task(asyncio.to_thread(charger_modele))
     yield
+    chargement.cancel()
     await fermer_client()
 
 

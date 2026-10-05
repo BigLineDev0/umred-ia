@@ -31,3 +31,9 @@ def test_chat_sans_token(client, django):
 
 def test_health_n_expose_pas_l_url_interne(client):
     assert "django" not in client.get("/health").text
+
+
+def test_cle_hugging_face_vide_ignoree(monkeypatch):
+    from app.core.config import Settings
+    monkeypatch.setenv("HUGGINGFACE_API_KEY", "")
+    assert Settings().huggingface_api_key is None
