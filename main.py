@@ -6,6 +6,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
+from app.assistant.synthese import CONSIGNES
+from app.nlu.conversation import CONVERSATION_SYSTEM_PROMPT
+from app.nlu.extractor import SYSTEM_PROMPT
 from app.nlu.model import charger_modele, modele_disponible
 from app.routes.chat import router as chat_router
 from app.routes.pilotage import router as pilotage_router
@@ -20,8 +23,10 @@ async def lifespan(app: FastAPI):
     # télécharger ~3 Go, et le service doit répondre pendant ce temps. Tant
     # que le modèle n'est pas prêt, modele_disponible() vaut False et
     # l'assistant fonctionne avec les règles (mode dégradé), puis bascule
-    # automatiquement sur le modèle une fois chargé.
-    chargement = asyncio.create_task(asyncio.to_thread(charger_modele))
+    # automatiquement sur le modèle une fois chargé. Les prompts système
+    # fixes sont calculés pendant ce chargement (voir app/nlu/model.py).
+    prompts = [SYSTEM_PROMPT, CONVERSATION_SYSTEM_PROMPT, CONSIGNES]
+    chargement = asyncio.create_task(asyncio.to_thread(charger_modele, prompts))
     yield
     chargement.cancel()
     await fermer_client()

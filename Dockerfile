@@ -1,33 +1,19 @@
 FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    # Cache Hugging Face sur un volume : le modèle (~3 Go) n'est téléchargé
-    # qu'au premier démarrage, pas à chaque reconstruction de l'image.
-    HF_HOME=/cache/huggingface
-
 WORKDIR /app
 
-# PyTorch en version CPU depuis l'index officiel : la version par défaut de
-# PyPI embarque CUDA (plusieurs Go) alors que le modèle tourne sur CPU.
-# 2.14.0+cpu satisfait ensuite le « torch==2.14.0 » de requirements.txt.
-RUN pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.0
-
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+# torch en version CPU uniquement (beaucoup plus léger que la version CUDA
+# par défaut) : on l'installe d'abord avec l'index PyTorch dédié, puis le
+# reste des dépendances normalement.
+# La version DOIT être la même que dans requirements.txt : sinon pip
+# remplace torch CPU par la version CUDA de PyPI (plusieurs Go en plus).
+# Timeout/retries élevés : les gros wheels échouent sur une connexion lente.
+ENV PIP_DEFAULT_TIMEOUT=300 PIP_RETRIES=10
+RUN pip install --no-cache-dir torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN useradd --create-home --uid 1000 umred \
-    && mkdir -p /cache/huggingface && chown -R umred:umred /cache
-COPY --chown=umred:umred . .
-USER umred
+COPY . .
 
-EXPOSE 8001
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
 
-# Le modèle se charge en arrière-plan : /health répond dès le démarrage
-# (« mode_degrade » tant que le modèle n'est pas prêt, puis « charge »).
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=4)"
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--proxy-headers", "--forwarded-allow-ips", "*"]
