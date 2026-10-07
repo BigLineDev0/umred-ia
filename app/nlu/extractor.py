@@ -36,6 +36,8 @@ Intentions possibles :
 - maintenance : il demande la prochaine maintenance d'un équipement
 - statistiques : il demande un nombre, un total, une statistique
 - creer_equipement : il veut ajouter un nouvel équipement au parc
+- naviguer : il veut ouvrir une page ou gérer une rubrique (équipements, laboratoires, utilisateurs, maintenances, rapports, journal)
+- motif_refus : il demande pourquoi une de ses réservations a été refusée
 - mon_nom : il demande qui il est, son nom
 - identite : il demande qui tu es, ce que tu sais faire
 - salutation : simple salutation, sans autre demande
@@ -64,6 +66,8 @@ Message : Comment faire une réservation ?
 {{"intention": "autre", "equipement": null, "date": null, "heure_debut": null, "heure_fin": null}}
 Message : Ajoute un équipement thermocycleur
 {{"intention": "creer_equipement", "equipement": "thermocycleur", "date": null, "heure_debut": null, "heure_fin": null}}
+Message : J'aimerais m'occuper des comptes des utilisateurs
+{{"intention": "naviguer", "equipement": null, "date": null, "heure_debut": null, "heure_fin": null}}
 
 Intentions autorisées : {", ".join(i.value for i in Intention)}."""
 
@@ -115,11 +119,12 @@ def fusionner(donnees_modele: dict, regles: Extraction, message: str) -> Extract
 
     return Extraction(
         intention=intention,
-        equipement=valeur_ou_none(donnees_modele.get("equipement")),
+        equipement=valeur_ou_none(donnees_modele.get("equipement")) or regles.equipement,
         date=date,
         heure_debut=heure_debut,
         heure_fin=heure_fin,
         periode=regles.periode,
+        moment=regles.moment,
     )
 
 

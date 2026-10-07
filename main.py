@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     await fermer_client()
 
 
-app = FastAPI(title="UMRED Labo — Service IA", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="UMRED Labo — Service IA", version="1.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

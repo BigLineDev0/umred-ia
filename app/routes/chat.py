@@ -23,6 +23,8 @@ MESSAGE_SERVICE_INDISPONIBLE = (
     "Réessayez dans quelques instants ou utilisez les pages de la plateforme."
 )
 MESSAGE_ERREUR_INTERNE = "Désolé, une erreur inattendue s'est produite. Pouvez-vous reformuler votre demande ?"
+MESSAGE_PERMISSION_REFUSEE = "Je ne peux pas effectuer cette action avec votre rôle actuel."
+MESSAGE_INTROUVABLE = "Je n'ai pas trouvé l'élément demandé : il n'existe pas ou vous n'y avez pas accès."
 
 
 def _erreur_django(exc: DjangoAPIError) -> ChatResponse:
@@ -30,8 +32,14 @@ def _erreur_django(exc: DjangoAPIError) -> ChatResponse:
     # tel quel : le frontend redirige alors vers la connexion.
     if exc.status_code == status.HTTP_401_UNAUTHORIZED:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expirée, veuillez vous reconnecter.")
+    # 403 : Django a refusé l'action pour ce rôle. On le dit clairement,
+    # sans laisser croire à une panne.
+    if exc.status_code == status.HTTP_403_FORBIDDEN:
+        return ChatResponse(type="denied", reponse=MESSAGE_PERMISSION_REFUSEE)
+    if exc.status_code == status.HTTP_404_NOT_FOUND:
+        return ChatResponse(type="error", reponse=MESSAGE_INTROUVABLE)
     logger.warning("Erreur Django : %s", exc)
-    return ChatResponse(reponse=MESSAGE_SERVICE_INDISPONIBLE)
+    return ChatResponse(type="error", reponse=MESSAGE_SERVICE_INDISPONIBLE)
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -48,7 +56,7 @@ async def chat(payload: ChatRequest, user: Utilisateur = Depends(limiter_debit))
         # Filet de sécurité : l'utilisateur garde une conversation
         # utilisable, et la trace complète part dans les logs.
         logger.exception("Erreur inattendue pendant le traitement du message")
-        return ChatResponse(reponse=MESSAGE_ERREUR_INTERNE)
+        return ChatResponse(type="error", reponse=MESSAGE_ERREUR_INTERNE)
 
     ajouter_historique(session, message, reponse.reponse)
     return reponse

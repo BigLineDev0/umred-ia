@@ -47,7 +47,10 @@ def cle_session(user_id: int, session_id: str) -> str:
 
 
 def _nouvelle_session() -> dict[str, Any]:
-    return {"etape": None, "contexte": {}, "historique": [], "derniere_activite": time.monotonic()}
+    # « memoire » survit à la fin d'une étape : elle retient le dernier
+    # équipement et la dernière date évoqués, pour comprendre « réserve-le »
+    # ou « et vendredi ? » au message suivant.
+    return {"etape": None, "contexte": {}, "historique": [], "memoire": {}, "derniere_activite": time.monotonic()}
 
 
 def _purger(maintenant: float) -> None:
@@ -83,6 +86,11 @@ def definir_etape(session: dict[str, Any], etape: Etape, **contexte: Any) -> Non
 def terminer_etape(session: dict[str, Any]) -> None:
     session["etape"] = None
     session["contexte"] = {}
+
+
+def memoriser(session: dict[str, Any], **elements: Any) -> None:
+    """Retient des éléments du sujet en cours (uniquement des données déjà validées par Django)."""
+    session["memoire"].update({k: v for k, v in elements.items() if v is not None})
 
 
 def ajouter_historique(session: dict[str, Any], message: str, reponse: str) -> None:

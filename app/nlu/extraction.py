@@ -19,8 +19,14 @@ class Extraction:
     date: str | None = None
     heure_debut: str | None = None
     heure_fin: str | None = None
-    periode: str = "jour"  # "jour" ou "semaine"
+    # "jour", "semaine" (7 prochains jours), "semaine_prochaine" ou
+    # "debut_semaine" (lundi -> mercredi).
+    periode: str = "jour"
+    # Moment de la journée sans heure précise : "matin", "apres_midi",
+    # "soir" ou "journee". Converti en heures par le service, à partir des
+    # horaires réels de l'établissement (lus dans Django).
+    moment: str | None = None
 
     @property
     def a_des_informations_de_reservation(self) -> bool:
-        return any([self.equipement, self.date, self.heure_debut, self.heure_fin])
+        return any([self.equipement, self.date, self.heure_debut, self.heure_fin, self.moment])

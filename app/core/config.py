@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # coûte cher en CPU, un seul client ne doit pas pouvoir saturer le service.
     rate_limit_par_minute: int = 20
 
+    # --- Fuseau horaire de l'établissement (identique au TIME_ZONE de Django) ---
+    time_zone: str = "Africa/Dakar"
+
     # --- Sessions de conversation ---
     session_ttl_minutes: int = 30
     session_max: int = 5000

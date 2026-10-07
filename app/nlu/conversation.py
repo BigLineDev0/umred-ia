@@ -9,7 +9,8 @@ MESSAGE_AIDE = (
     "- réserver un équipement (« Réserve le microscope demain de 10h à 12h »)\n"
     "- consulter vos réservations ou les disponibilités\n"
     "- annuler une réservation\n"
-    "- connaître la prochaine maintenance d'un équipement"
+    "- connaître la prochaine maintenance d'un équipement\n"
+    "- vous ouvrir la bonne page (« Je veux ajouter un équipement », « Je veux gérer les laboratoires »)"
 )
 
 CONVERSATION_SYSTEM_PROMPT = """Tu es l'assistant virtuel de UMRED Labo, la plateforme de gestion des laboratoires

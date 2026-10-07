@@ -97,17 +97,79 @@ def extraire_date(message: str) -> str | None:
 
 
 def extraire_periode(message_normalise: str) -> str:
+    if "debut de semaine" in message_normalise or "debut de la semaine" in message_normalise:
+        return "debut_semaine"
+    if "semaine prochaine" in message_normalise:
+        return "semaine_prochaine"
     return "semaine" if "semaine" in message_normalise else "jour"
 
 
+# « toute la journée » doit passer avant « matin » (« de la matinée à... »).
+_MOMENTS = [
+    ("journee", ("toute la journee", "journee entiere", "la journee complete", "toute la jour")),
+    ("apres_midi", ("apres-midi", "apres midi", "aprem", "aprm")),
+    ("matin", ("matin",)),
+    ("soir", ("soir",)),
+]
+
+
+def extraire_moment(message_normalise: str) -> str | None:
+    for moment, expressions in _MOMENTS:
+        if any(e in message_normalise for e in expressions):
+            return moment
+    return None
+
+
+# Nom de l'équipement cité après un verbe de réservation : « réserve le
+# XYZ-999 demain » -> « XYZ-999 ». Sert à répondre « aucun équipement ne
+# correspond à XYZ-999 » au lieu de redemander quel équipement.
+_OBJET_RESERVATION = re.compile(
+    r"\b(?:reserve[rz]?|reservons|bloquer?|prendre|utiliser)(?:[- ]moi)?\s+"
+    r"(?:(?:le|la|les|un|une|du|des|mon|ma)\s+|l')?"
+    r"(?P<objet>.+?)"
+    r"(?=\s+(?:demain|aujourd|apres|ce |cet |cette |lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|le \d|le premier"
+    r"|de \d|des \d|a \d|entre|pour|matin|soir|toute|en debut|la semaine|jusqu|pendant|vers|svp|s'il)|\s*[?.!,;]|$)"
+)
+# Le verbe est directement suivi d'une date ou d'un horaire (« réserver demain ») :
+# aucun équipement n'est cité.
+_DEBUT_NON_EQUIPEMENT = re.compile(
+    r"^(?:demain|aujourd|apres|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|ce |cet |cette |pour|matin|soir"
+    r"|toute|de \d|a \d|\d|entre|le \d)"
+)
+# Formulations qui ne désignent aucun équipement précis.
+_OBJETS_GENERIQUES = ("quelque chose", "equipement", "appareil", "machine", "creneau", "reservation", "salle")
+
+
+def extraire_objet_reservation(message_normalise: str) -> str | None:
+    correspondance = _OBJET_RESERVATION.search(message_normalise)
+    if not correspondance:
+        return None
+    objet = correspondance.group("objet").strip(" -'")
+    if not objet or _DEBUT_NON_EQUIPEMENT.match(objet) or len(objet) > 60 or objet in _OBJETS_GENERIQUES or objet.startswith(("quelque", "un ", "une ")):
+        return None
+    return objet
+
+
+def _graphie_originale(fragment: str | None, message: str, message_normalise: str) -> str | None:
+    """« xyz-999 » -> « XYZ-999 » tel que tapé (la normalisation conserve les positions)."""
+    if not fragment or len(message) != len(message_normalise):
+        return fragment
+    debut = message_normalise.find(fragment)
+    return message[debut:debut + len(fragment)] if debut >= 0 else fragment
+
+
 def extraire_par_regles(message: str) -> Extraction:
+    message = message.strip()
     message_normalise = normaliser_texte(message)
     heure_debut, heure_fin = extraire_heures(message)
     return Extraction(
         intention=intention_par_mots_cles(message_normalise),
-        equipement=None,  # la recherche floue se fera sur le message complet
+        # Seul le nom cité après « réserver » est isolé ; sinon la recherche
+        # floue se fera sur le message complet.
+        equipement=_graphie_originale(extraire_objet_reservation(message_normalise), message, message_normalise),
         date=extraire_date(message),
         heure_debut=heure_debut,
         heure_fin=heure_fin,
         periode=extraire_periode(message_normalise),
+        moment=extraire_moment(message_normalise),
     )

@@ -11,11 +11,27 @@ Chef d'orchestre du dialogue. Pour chaque message :
 
 Les deux tables de routage ci-dessous remplacent une longue cascade de
 `if` : ajouter une intention = écrire une fonction + une ligne ici.
+
+C'est ici que se fait le « tool calling » : le modèle de langage ne choisit
+qu'une intention dans une liste fermée (sortie JSON validée), et c'est ce
+routeur déterministe qui décide quels outils Django appeler. Les outils
+sont les fonctions de app/services/django_client.py (une fonction = un
+endpoint, appelé avec le JWT de l'utilisateur) :
+
+    intention                   outils Django appelés
+    reserver                    get_equipements, get_creneaux_occupes, verifier_reservation, creer_reservation
+    consulter_disponibilite     get_equipements, get_creneaux_occupes, verifier_reservation
+    consulter_mes_reservations  get_reservations (filtres de période appliqués par Django)
+    annuler                     get_reservations, annuler_reservation (après confirmation)
+    motif_refus                 get_reservations(statut=REFUSEE)
+    maintenance                 get_equipements, get_maintenances
+    statistiques                get_reservations, get_equipements, get_maintenances
+    naviguer / creer_equipement aucun : catalogue de pages app/core/navigation.py
 """
 import re
 from collections.abc import Awaitable, Callable
 
-from app.assistant import annulation, consultation, disponibilites, reservation
+from app.assistant import annulation, consultation, disponibilites, navigation, reservation
 from app.assistant.contexte import Contexte
 from app.core.security import Utilisateur
 from app.core.session_store import Etape, terminer_etape
@@ -41,7 +57,9 @@ GESTIONNAIRES_INTENTION: dict[Intention, Gestionnaire] = {
     Intention.CONSULTER_DISPONIBILITE: disponibilites.consulter_disponibilite,
     Intention.MAINTENANCE: consultation.prochaine_maintenance,
     Intention.STATISTIQUES: consultation.statistiques,
-    Intention.CREER_EQUIPEMENT: consultation.expliquer_creation_equipement,
+    Intention.CREER_EQUIPEMENT: navigation.creer_equipement,
+    Intention.NAVIGUER: navigation.naviguer,
+    Intention.MOTIF_REFUS: consultation.expliquer_refus,
     Intention.MON_NOM: consultation.donner_nom,
     Intention.IDENTITE: consultation.presenter_assistant,
     Intention.SALUTATION: consultation.saluer,
@@ -49,7 +67,7 @@ GESTIONNAIRES_INTENTION: dict[Intention, Gestionnaire] = {
 }
 
 # Valeur d'un bouton cliquable (« equip_3 », « alt_0 »...).
-_VALEUR_BOUTON = re.compile(r"^(equip|dispo|alt|equiv|annul)_\d+$")
+_VALEUR_BOUTON = re.compile(r"^(equip|dispo|alt|equiv|annul|creneau)_\d+$")
 
 
 async def traiter_message(user: Utilisateur, session: dict, message: str) -> ChatResponse:
@@ -63,6 +81,12 @@ async def traiter_message(user: Utilisateur, session: dict, message: str) -> Cha
             return reponse
         terminer_etape(session)
         etape = None
+
+    # Choix d'un créneau proposé pendant la collecte (« le premier », clic).
+    if etape == Etape.COLLECTE_RESERVATION:
+        reponse = await reservation.traiter_choix_creneau(ctx)
+        if reponse is not None:
+            return reponse
 
     # Clic sur un bouton d'une ancienne réponse (étape terminée ou session
     # expirée) : inutile d'envoyer « equip_3 » au modèle de langage.

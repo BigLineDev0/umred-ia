@@ -5,6 +5,7 @@ jours et des mois codés en dur : aucune dépendance à la locale du serveur.
 """
 from datetime import date
 
+from app.core import temps
 from app.core.constantes import LABELS_STATUT_RESERVATION
 from app.nlu.normalisation import JOURS_SEMAINE
 
@@ -13,7 +14,7 @@ MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet",
 
 
 def formater_date(iso: str, aujourd_hui: date | None = None) -> str:
-    aujourd_hui = aujourd_hui or date.today()
+    aujourd_hui = aujourd_hui or temps.aujourd_hui()
     try:
         d = date.fromisoformat(str(iso)[:10])
     except ValueError:
@@ -39,11 +40,11 @@ def formater_plage(debut: str, fin: str) -> str:
     return f"de {formater_heure(debut)} à {formater_heure(fin)}"
 
 
-def formater_liste(elements: list[str]) -> str:
-    """["a", "b", "c"] -> « a, b et c »."""
+def formater_liste(elements: list[str], conjonction: str = "et") -> str:
+    """["a", "b", "c"] -> « a, b et c » (ou « a, b ou c » pour un choix)."""
     if len(elements) <= 1:
         return "".join(elements)
-    return f"{', '.join(elements[:-1])} et {elements[-1]}"
+    return f"{', '.join(elements[:-1])} {conjonction} {elements[-1]}"
 
 
 def resume_reservation(r: dict) -> str:

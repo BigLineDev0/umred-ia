@@ -1,33 +1,52 @@
 """
 Parcours de réservation, étape par étape :
 
-    demande -> COLLECTE (infos manquantes ?) -> SELECTION_EQUIPEMENT (ambiguïté ?)
-            -> CONFIRMATION ─> envoi à Django -> succès
-                                                 └> conflit 409 ─> SELECTION_ALTERNATIVE ──> CONFIRMATION
+    demande -> COLLECTE (infos manquantes ? créneaux proposés) -> SELECTION_EQUIPEMENT (ambiguïté ?)
+            -> vérification Django (/reservations/verifier/) ─> CONFIRMATION ─> envoi à Django -> succès
+                         └> conflit ─> SELECTION_ALTERNATIVE ──> CONFIRMATION
 
 Le « brouillon » est la demande en cours de construction : il survit
 d'un message à l'autre, ce qui permet à l'utilisateur de compléter sa
-demande (« Réserve le microscope » puis « demain de 10h à 12h »).
+demande (« Réserve le microscope » puis « demain » puis « le matin »).
+
+L'assistant ne décide jamais qu'un créneau est libre : il propose des
+créneaux à partir du planning renvoyé par Django, puis c'est Django qui
+vérifie la demande (conflits, règles de l'établissement, statut) avant
+la confirmation, et la revérifie à la création.
 """
 import asyncio
+import re
 from datetime import datetime
 from typing import Any
 
 from app.assistant.contexte import Contexte, est_non, est_oui, lire_choix, lire_numero, options_confirmation
-from app.assistant.formatage import formater_date, formater_liste, formater_plage
+from app.assistant.formatage import formater_date, formater_heure, formater_liste, formater_plage
+from app.assistant.navigation import actions_pages
+from app.core import temps
 from app.core.constantes import STATUTS_EQUIPEMENT_NON_RESERVABLES
-from app.core.session_store import Etape, definir_etape, terminer_etape
+from app.core.session_store import Etape, definir_etape, memoriser, terminer_etape
 from app.nlu.intentions import Intention
 from app.schemas.chat import ChatOption, ChatResponse, DetailsConfirmation
-from app.services.disponibilite import est_disponible
-from app.services.django_client import creer_reservation, get_alerte_usure, get_equipements
+from app.services.disponibilite import (
+    LIBELLES_MOMENTS, calculer_creneaux_libres, decouper_en_creneaux, est_disponible, fenetre_moment,
+    jours_de_la_periode, restreindre,
+)
+from app.services.django_client import (
+    creer_reservation, get_alerte_usure, get_creneaux_occupes, get_equipements, get_horaires, get_reservations,
+    verifier_reservation,
+)
 from app.services.matching import equipements_mentionnes
 
 MOTIF_PAR_DEFAUT = "Réservation via l'assistant UMRED"
-LIBELLES_CHAMPS = {"equipement": "l'équipement", "date": "la date", "heure_debut": "l'heure de début", "heure_fin": "l'heure de fin"}
 # Pendant la collecte, un message reconnu comme l'une de ces intentions
 # complète la demande en cours ; toute autre intention l'abandonne.
 INTENTIONS_COMPATIBLES_COLLECTE = {Intention.RESERVER, Intention.AUTRE, Intention.CONSULTER_DISPONIBILITE}
+DUREE_CRENEAU_PROPOSE = 120  # minutes
+
+# « Le même équipement que la dernière fois », « comme d'habitude ».
+_MEME_QUE_LA_DERNIERE_FOIS = re.compile(r"meme (?:equipement|appareil|machine|chose)|(?:que|comme) la derniere fois|comme d'habitude|habituel")
+# « Réserve-le », « je veux le réserver » : l'équipement dont on vient de parler.
+_PRONOM_EQUIPEMENT = re.compile(r"\breserve[rz]?-(?:le|la|les)\b|\b(?:le|la|les|l') ?reserver\b|\bcelui-ci\b|\bcelle-ci\b|\bcet equipement\b")
 
 
 # ---------------------------------------------------------------------------
@@ -35,38 +54,76 @@ INTENTIONS_COMPATIBLES_COLLECTE = {Intention.RESERVER, Intention.AUTRE, Intentio
 # ---------------------------------------------------------------------------
 
 def _brouillon_vide() -> dict[str, Any]:
-    return {"equipement": None, "equipement_choisi": None, "date": None, "heure_debut": None, "heure_fin": None}
+    return {"equipement": None, "equipement_choisi": None, "date": None, "heure_debut": None, "heure_fin": None,
+            "moment": None, "periode": None}
 
 
 def _completer_brouillon(brouillon: dict[str, Any], ctx: Contexte) -> dict[str, Any]:
     """Les nouvelles informations remplacent les anciennes, les absentes ne les effacent pas."""
     ext = ctx.extraction
-    nouveau = dict(brouillon)
+    nouveau = {**_brouillon_vide(), **brouillon}
     if ext.equipement:
         # L'utilisateur désigne un autre équipement : on oublie le précédent choix.
         nouveau.update(equipement=ext.equipement, equipement_choisi=None)
-    for champ in ("date", "heure_debut", "heure_fin"):
+    for champ in ("date", "heure_debut", "heure_fin", "moment"):
         if getattr(ext, champ):
             nouveau[champ] = getattr(ext, champ)
+    if ext.date:
+        nouveau["periode"] = None
+    elif ext.periode == "debut_semaine":
+        nouveau["periode"] = ext.periode
     # On attendait l'heure de fin et l'utilisateur répond par une seule
     # heure (« 12h ») postérieure au début : c'est la réponse à la question.
-    if (brouillon["heure_debut"] and not brouillon["heure_fin"] and ext.heure_debut
+    if (brouillon.get("heure_debut") and not brouillon.get("heure_fin") and ext.heure_debut
             and not ext.heure_fin and ext.heure_debut > brouillon["heure_debut"]):
         nouveau.update(heure_debut=brouillon["heure_debut"], heure_fin=ext.heure_debut)
     return nouveau
 
 
+async def _equipement_de_la_derniere_fois(ctx: Contexte) -> dict | None:
+    """
+    Équipement de la réservation la plus récente de l'utilisateur, lu dans
+    Django (jamais deviné) : en priorité une réservation passée, sinon la
+    plus proche à venir.
+    """
+    reservations = [r for r in await get_reservations(ctx.token)
+                    if r.get("equipements") and r.get("statut") in ("VALIDEE", "TERMINEE", "EN_ATTENTE")]
+    if not reservations:
+        return None
+    aujourd_hui = temps.aujourd_hui().isoformat()
+    passees = sorted((r for r in reservations if r["date"] <= aujourd_hui), key=lambda r: (r["date"], r["heure_debut"]))
+    derniere = passees[-1] if passees else min(reservations, key=lambda r: (r["date"], r["heure_debut"]))
+    equipements = {e["id"]: e for e in await get_equipements(ctx.token)}
+    return equipements.get(derniere["equipements"][0])
+
+
 async def demarrer_reservation(ctx: Contexte) -> ChatResponse:
-    return await avancer_reservation(ctx, _completer_brouillon(_brouillon_vide(), ctx))
+    brouillon = _completer_brouillon(_brouillon_vide(), ctx)
+    memoire = ctx.session.get("memoire", {})
+
+    if _MEME_QUE_LA_DERNIERE_FOIS.search(ctx.message_normalise):
+        equipement = await _equipement_de_la_derniere_fois(ctx)
+        if equipement is None:
+            return ChatResponse(type="clarification", intention=Intention.RESERVER,
+                                reponse="Je ne retrouve aucune réservation précédente avec un équipement. "
+                                        "Quel équipement souhaitez-vous réserver ?",
+                                actions=actions_pages(ctx.user.role, "equipements"))
+        brouillon.update(equipement=equipement["nom"], equipement_choisi=equipement)
+    elif _PRONOM_EQUIPEMENT.search(ctx.message_normalise) and memoire.get("equipement"):
+        # « Réserve-le » juste après « le PCR est-il libre demain ? ».
+        brouillon.update(equipement=memoire["equipement"]["nom"], equipement_choisi=memoire["equipement"])
+        if not brouillon["date"] and memoire.get("date"):
+            brouillon["date"] = memoire["date"]
+    return await avancer_reservation(ctx, brouillon)
 
 
 async def poursuivre_collecte(ctx: Contexte) -> ChatResponse | None:
     """
-    L'utilisateur répond à une question du type « il me manque l'heure de fin ».
+    L'utilisateur répond à une question du type « pour quelle date ? ».
     Renvoie None si le message n'a rien à voir avec la demande en cours :
     le dialogue l'abandonne alors et traite le message normalement.
     """
-    brouillon = ctx.contexte_etape["brouillon"]
+    brouillon = {**_brouillon_vide(), **ctx.contexte_etape["brouillon"]}
     if est_non(ctx.message_normalise):
         terminer_etape(ctx.session)
         return ChatResponse(reponse="D'accord, j'abandonne cette demande de réservation.")
@@ -82,6 +139,25 @@ async def poursuivre_collecte(ctx: Contexte) -> ChatResponse | None:
             return None
         nouveau["equipement"] = ctx.message
     return await avancer_reservation(ctx, nouveau)
+
+
+async def traiter_choix_creneau(ctx: Contexte) -> ChatResponse | None:
+    """
+    Choix d'un des créneaux proposés pendant la collecte : clic sur le
+    bouton (« creneau_0 ») ou réponse « le premier », « 2 »... Renvoie None
+    si le message n'est pas un tel choix (il sera lu comme un complément).
+    """
+    creneaux = ctx.contexte_etape.get("creneaux") or []
+    if not creneaux:
+        return None
+    index = lire_choix(ctx.message_normalise, "creneau")
+    if index is None:
+        index = lire_numero(ctx.message_normalise, len(creneaux))
+    if index is None or index >= len(creneaux):
+        return None
+    debut, fin = creneaux[index]
+    brouillon = {**_brouillon_vide(), **ctx.contexte_etape["brouillon"], "heure_debut": debut, "heure_fin": fin}
+    return await avancer_reservation(ctx, brouillon)
 
 
 def _verifier_coherence(brouillon: dict[str, Any], maintenant: datetime) -> list[str]:
@@ -100,13 +176,18 @@ def _verifier_coherence(brouillon: dict[str, Any], maintenant: datetime) -> list
     return remarques
 
 
+async def horaires_etablissement(ctx: Contexte) -> dict:
+    horaires = await get_horaires(ctx.token)
+    return {"ouverture": horaires[0], "fermeture": horaires[1]} if horaires else {}
+
+
 async def avancer_reservation(ctx: Contexte, brouillon: dict[str, Any]) -> ChatResponse:
     """
     Fait progresser la demande aussi loin que possible : vérifie la
-    cohérence, identifie l'équipement, demande ce qui manque, puis passe
-    à la sélection (si ambiguïté) ou directement à la confirmation.
+    cohérence, identifie l'équipement, demande ce qui manque (une question
+    à la fois), puis passe à la sélection (si ambiguïté) ou à la confirmation.
     """
-    remarques = _verifier_coherence(brouillon, datetime.now())
+    remarques = _verifier_coherence(brouillon, temps.maintenant())
 
     # --- Identification de l'équipement ---
     par_famille: dict[str, list[dict]] = {}
@@ -116,19 +197,45 @@ async def avancer_reservation(ctx: Contexte, brouillon: dict[str, Any]) -> ChatR
         equipements = await get_equipements(ctx.token)
         texte = brouillon["equipement"] or ctx.message
         par_famille = equipements_mentionnes(texte, equipements)
+        if not par_famille and brouillon["equipement"] and texte != ctx.message:
+            # Le nom isolé par les règles peut être trop court : on retente sur le message entier.
+            par_famille = equipements_mentionnes(ctx.message, equipements)
+            texte = ctx.message if par_famille else texte
         if par_famille:
             brouillon["equipement"] = texte
         elif brouillon["equipement"]:
-            remarques.append(f"Je ne trouve aucun équipement correspondant à « {brouillon['equipement']} ».")
+            remarques.append(f"Je n'ai trouvé aucun équipement correspondant à « {brouillon['equipement']} ».")
             brouillon["equipement"] = None
 
-    # --- Informations manquantes : on les demande toutes en une fois ---
-    manquants = [c for c in ("date", "heure_debut", "heure_fin") if not brouillon[c]]
+    # Un seul équipement réservable identifié : on peut lui proposer des créneaux.
+    unique = None
+    if len(par_famille) == 1:
+        candidats = [e for e in next(iter(par_famille.values())) if e.get("statut") not in STATUTS_EQUIPEMENT_NON_RESERVABLES]
+        unique = candidats[0] if len(candidats) == 1 else None
+
+    # « Toute la journée » : de l'ouverture à la fermeture de l'établissement.
+    if brouillon["moment"] == "journee" and brouillon["date"] and not brouillon["heure_debut"]:
+        horaires = await horaires_etablissement(ctx)
+        brouillon["heure_debut"], brouillon["heure_fin"] = fenetre_moment("journee", **horaires)
+
+    # --- Informations manquantes : une question à la fois ---
     if not par_famille:
-        manquants.insert(0, "equipement")
-    if manquants:
-        definir_etape(ctx.session, Etape.COLLECTE_RESERVATION, brouillon=brouillon)
-        return ChatResponse(reponse=_question_informations_manquantes(remarques, manquants, par_famille), intention=Intention.RESERVER)
+        return _demander(ctx, brouillon, remarques, "Quel équipement souhaitez-vous réserver ? "
+                                                   "Par exemple : « le microscope demain de 10h à 12h ».",
+                         actions=actions_pages(ctx.user.role, "equipements"))
+    nom = unique["nom"] if unique else formater_liste([c[0]["nom"] if len(c) == 1 else f for f, c in par_famille.items()])
+    if not brouillon["date"]:
+        if brouillon["periode"] == "debut_semaine":
+            jours = formater_liste([formater_date(j) for j in jours_de_la_periode("debut_semaine")], "ou")
+            question = f"Quel jour souhaitez-vous réserver {nom} : {jours} ?"
+        else:
+            question = f"Pour quelle date souhaitez-vous réserver {nom} ? Vous pouvez aussi préciser l'horaire, par exemple « demain de 10h à 12h »."
+        return _demander(ctx, brouillon, remarques, question)
+    if brouillon["heure_debut"] and not brouillon["heure_fin"]:
+        return _demander(ctx, brouillon, remarques, f"Jusqu'à quelle heure souhaitez-vous réserver {nom} à partir de "
+                                                   f"{formater_heure(brouillon['heure_debut'])} ? Il me manque l'heure de fin.")
+    if not brouillon["heure_debut"]:
+        return await _proposer_creneaux(ctx, brouillon, remarques, nom, unique)
 
     # --- Équipements indisponibles (panne, maintenance, hors service) ---
     resolus: list[dict] = []
@@ -151,14 +258,46 @@ async def avancer_reservation(ctx: Contexte, brouillon: dict[str, Any]) -> ChatR
     return await proposer_confirmation(ctx, creneau, resolus)
 
 
-def _question_informations_manquantes(remarques: list[str], manquants: list[str], par_famille: dict) -> str:
-    objet = ""
-    if par_famille:
-        noms = [candidats[0]["nom"] if len(candidats) == 1 else fam for fam, candidats in par_famille.items()]
-        objet = f" {formater_liste(noms)}"
-    question = f"Pour réserver{objet}, il me manque {formater_liste([LIBELLES_CHAMPS[c] for c in manquants])}."
-    exemple = "« le microscope demain de 10h à 12h »" if "equipement" in manquants else "« demain de 10h à 12h »"
-    return " ".join([*remarques, question, f"Par exemple : {exemple}."])
+def _demander(ctx: Contexte, brouillon: dict, remarques: list[str], question: str, **extra: Any) -> ChatResponse:
+    definir_etape(ctx.session, Etape.COLLECTE_RESERVATION, brouillon=brouillon)
+    return ChatResponse(type="clarification", reponse=" ".join([*remarques, question]), intention=Intention.RESERVER, **extra)
+
+
+async def _proposer_creneaux(ctx: Contexte, brouillon: dict, remarques: list[str], nom: str, equipement: dict | None) -> ChatResponse:
+    """
+    Date connue, horaire inconnu : on propose des créneaux libres calculés
+    à partir des réservations renvoyées par Django (« le matin » limite la
+    recherche). Le créneau choisi sera de toute façon revérifié par Django.
+    """
+    exemple = "l'heure de début et l'heure de fin, par exemple « de 10h à 12h »."
+    if equipement is None:
+        # Plusieurs équipements possibles : impossible de proposer un planning commun.
+        return _demander(ctx, brouillon, remarques, f"À quelle heure souhaitez-vous réserver {nom} "
+                                                   f"{formater_date(brouillon['date'])} ? Indiquez {exemple}")
+
+    date_iso = brouillon["date"]
+    horaires = await horaires_etablissement(ctx)
+    occupes = await get_creneaux_occupes(ctx.token, equipement["id"], date_iso, date_iso)
+    libres = calculer_creneaux_libres(occupes, [date_iso], temps.maintenant(), **horaires)[date_iso]
+    libres = restreindre(libres, fenetre_moment(brouillon["moment"], **horaires))
+    creneaux = decouper_en_creneaux(libres, DUREE_CRENEAU_PROPOSE)
+    quand = f"{formater_date(date_iso)}" + (f" {LIBELLES_MOMENTS[brouillon['moment']]}" if brouillon["moment"] else "")
+
+    definir_etape(ctx.session, Etape.COLLECTE_RESERVATION, brouillon=brouillon, creneaux=creneaux)
+    if not creneaux:
+        return ChatResponse(type="clarification", intention=Intention.RESERVER,
+                            reponse=" ".join([*remarques, f"{nom} n'a plus de créneau libre {quand}. "
+                                              "Souhaitez-vous une autre date ou un autre moment de la journée ?"]),
+                            data={"equipement": nom, "date": date_iso, "creneaux": []})
+
+    propositions = formater_liste([f"{formater_heure(d)}–{formater_heure(f)}" for d, f in creneaux], "ou")
+    question = f"Quel créneau souhaitez-vous pour {nom} {quand} : {propositions} ? Vous pouvez aussi indiquer {exemple}"
+    return ChatResponse(
+        type="clarification", intention=Intention.RESERVER,
+        reponse=" ".join([*remarques, question]),
+        options=[ChatOption(label=f"{formater_heure(d)} – {formater_heure(f)}", value=f"creneau_{i}") for i, (d, f) in enumerate(creneaux)],
+        data={"equipement": nom, "date": date_iso, "creneaux": [{"debut": d, "fin": f} for d, f in creneaux]},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +366,23 @@ async def proposer_confirmation(ctx: Contexte, creneau: dict, equipements: list[
         **creneau,
         "motif": MOTIF_PAR_DEFAUT,
     }
+    # Vérification par Django AVANT de demander la confirmation : un conflit
+    # ou une règle non respectée est annoncé tout de suite, avec les
+    # alternatives calculées par Django, au lieu d'après le « oui ».
+    verification = await verifier_reservation(ctx.token, reservation)
+    if verification.ok and verification.data.get("disponible") is False:
+        return proposer_alternatives(ctx, reservation, equipements, verification.data)
+    if verification.status_code == 400:
+        terminer_etape(ctx.session)
+        return ChatResponse(type="error", reponse=f"Cette demande ne peut pas être acceptée : {verification.detail}")
+    # Autre réponse (ancienne version de l'API sans /verifier/...) : on
+    # continue, la création revérifiera tout de toute façon.
+    information = []
+    if verification.ok and verification.data.get("statut_prevu") == "EN_ATTENTE":
+        information.append(f"ℹ️ Cette demande sera soumise à validation. {verification.data.get('raison_statut') or ''}".strip())
+
     definir_etape(ctx.session, Etape.CONFIRMATION_RESERVATION, reservation=reservation, equipements=equipements)
+    memoriser(ctx.session, equipement=equipements[0] if len(equipements) == 1 else None, date=creneau["date"])
 
     # Croisement avec l'algorithme d'alerte d'usure du tableau de bord
     # technicien : l'utilisateur est prévenu AVANT de confirmer, et non
@@ -236,7 +391,8 @@ async def proposer_confirmation(ctx: Contexte, creneau: dict, equipements: list[
     lignes = [f"{'🔴' if a['niveau'] == 'critique' else '🟠'} {a['message']}" for a in alertes if a]
 
     return ChatResponse(
-        reponse="\n\n".join([*lignes, "Confirmez-vous cette réservation ?"]),
+        type="confirmation",
+        reponse="\n\n".join([*lignes, *information, "Confirmez-vous cette réservation ?"]),
         necessite_confirmation=True,
         options=options_confirmation(),
         details_confirmation=DetailsConfirmation(
@@ -264,26 +420,38 @@ async def _finaliser_reservation(ctx: Contexte) -> ChatResponse:
     resultat = await creer_reservation(ctx.token, reservation)
 
     if resultat.status_code == 409:
-        return _proposer_alternatives(ctx, reservation, equipements, resultat.data)
+        return proposer_alternatives(ctx, reservation, equipements, resultat.data)
 
     terminer_etape(ctx.session)
     if not resultat.ok:
-        return ChatResponse(reponse=f"Je n'ai pas pu créer la réservation : {resultat.detail}")
+        return ChatResponse(type="error", reponse=f"Je n'ai pas pu créer la réservation : {resultat.detail}")
 
     quand = f"{formater_date(reservation['date'])} {formater_plage(reservation['heure_debut'], reservation['heure_fin'])}"
+    # Données renvoyées par Django après création : c'est la preuve que
+    # l'action a réellement eu lieu (identifiant et statut réels).
+    reponse = ChatResponse(
+        type="reservation",
+        reponse=f"C'est confirmé ! Votre réservation pour {quand} est validée.",
+        data={"id": resultat.data.get("id"), "statut": resultat.data.get("statut"), "date": reservation["date"],
+              "heure_debut": reservation["heure_debut"], "heure_fin": reservation["heure_fin"],
+              "equipements": [e["nom"] for e in equipements]},
+        actions=actions_pages(ctx.user.role, "mes_reservations"),
+    )
     # Le statut initial est décidé par Django (règles de gestion) : un
     # étudiant ou un équipement sensible passe par une validation humaine.
     if resultat.data.get("statut") == "EN_ATTENTE":
-        return ChatResponse(reponse=f"Votre demande pour {quand} est enregistrée. "
-                                    "Elle est en attente de validation par un responsable : vous serez notifié de sa décision.")
-    return ChatResponse(reponse=f"C'est confirmé ! Votre réservation pour {quand} est validée.")
+        reponse.reponse = (f"Votre demande pour {quand} est enregistrée. "
+                           "Elle est en attente de validation par un responsable : vous serez notifié de sa décision.")
+    return reponse
 
 
 # ---------------------------------------------------------------------------
 # 4. Conflit de planning : alternatives proposées par Django
 # ---------------------------------------------------------------------------
 
-def _proposer_alternatives(ctx: Contexte, reservation: dict, equipements: list[dict], conflit: dict) -> ChatResponse:
+def proposer_alternatives(
+    ctx: Contexte, reservation: dict, equipements: list[dict], conflit: dict, introduction: str | None = None,
+) -> ChatResponse:
     alternatives = conflit.get("alternatives") or {}
     # Créneaux libres pour TOUS les équipements demandés, classés par
     # proximité avec l'heure voulue ; chacun porte un message explicatif
@@ -292,7 +460,8 @@ def _proposer_alternatives(ctx: Contexte, reservation: dict, equipements: list[d
     # Chaque équivalent indique l'équipement qu'il remplace ('remplace').
     equivalents = alternatives.get("equipements_equivalents", [])
 
-    lignes = ["Ce créneau est déjà pris."]
+    lignes = [introduction or f"Ce créneau est déjà pris ({formater_date(reservation['date'])} "
+                              f"{formater_plage(reservation['heure_debut'], reservation['heure_fin'])})."]
     for c in conflit.get("conflits", []):
         lignes.append(f"- {c['equipement']} est réservé de {formater_plage(c['heure_debut'], c['heure_fin'])}")
 
@@ -312,11 +481,14 @@ def _proposer_alternatives(ctx: Contexte, reservation: dict, equipements: list[d
     if not options:
         terminer_etape(ctx.session)
         lignes.append("\nAucune alternative n'est disponible dans les prochains jours - contactez un technicien.")
-        return ChatResponse(reponse="\n".join(lignes))
+        return ChatResponse(type="availability", reponse="\n".join(lignes), data={"disponible": False, "alternatives": []})
 
     definir_etape(ctx.session, Etape.SELECTION_ALTERNATIVE, reservation=reservation, equipements=equipements,
                   alternatives=memes, equivalents=equivalents)
-    return ChatResponse(reponse="\n".join(lignes), options=options)
+    # Les alternatives sont celles calculées par Django : l'assistant se
+    # contente de les présenter.
+    return ChatResponse(type="availability", reponse="\n".join(lignes), options=options,
+                        data={"disponible": False, "alternatives": memes})
 
 
 async def traiter_selection_alternative(ctx: Contexte) -> ChatResponse | None:
@@ -347,7 +519,11 @@ async def traiter_selection_alternative(ctx: Contexte) -> ChatResponse | None:
 # Utilitaire partagé avec le parcours « disponibilités »
 # ---------------------------------------------------------------------------
 
-async def reserver_equipement_choisi(ctx: Contexte, equipement: dict, date_iso: str) -> ChatResponse:
+async def reserver_equipement_choisi(
+    ctx: Contexte, equipement: dict, date_iso: str, heure_debut: str | None = None, heure_fin: str | None = None,
+    moment: str | None = None,
+) -> ChatResponse:
     """Démarre une réservation pour un équipement déjà identifié (clic dans la liste des disponibilités)."""
-    brouillon = {**_brouillon_vide(), "equipement": equipement["nom"], "equipement_choisi": equipement, "date": date_iso}
+    brouillon = {**_brouillon_vide(), "equipement": equipement["nom"], "equipement_choisi": equipement, "date": date_iso,
+                 "heure_debut": heure_debut, "heure_fin": heure_fin, "moment": moment}
     return await avancer_reservation(ctx, brouillon)

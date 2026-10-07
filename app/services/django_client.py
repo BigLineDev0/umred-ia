@@ -130,17 +130,23 @@ async def get_alerte_usure(token: str, equipement_id: int) -> dict | None:
 
 # --- Réservations ---
 
-async def get_reservations(token: str, *, tous: bool = False, a_venir: bool = False) -> list[dict]:
+async def get_reservations(
+    token: str, *, tous: bool = False, a_venir: bool = False,
+    date_debut: str | None = None, date_fin: str | None = None, statut: str | None = None,
+) -> list[dict]:
     """
     Sans option : uniquement MES réservations (règle appliquée par Django).
-    tous=True : toutes les réservations — Django l'ignore si l'utilisateur
-    n'est pas superviseur, ce n'est donc pas un contournement possible.
+    tous=True : toutes les réservations de l'établissement — Django répond
+    403 si l'utilisateur n'est pas administrateur, ce n'est donc pas un
+    contournement possible. Les filtres de période et de statut sont
+    appliqués par Django.
     """
-    params = {}
+    params: dict[str, Any] = {}
     if tous:
         params["all"] = "true"
     if a_venir:
         params["a_venir"] = "true"
+    params.update({k: v for k, v in {"date_debut": date_debut, "date_fin": date_fin, "statut": statut}.items() if v})
     return await _lire("/reservations/", token, params=params)
 
 
@@ -169,6 +175,16 @@ async def get_horaires(token: str) -> tuple[str, str] | None:
     except Exception:
         logger.warning("Horaires de l'établissement indisponibles : horaires par défaut utilisés.")
         return None
+
+
+async def verifier_reservation(token: str, payload: dict) -> ResultatAction:
+    """
+    Vérification par Django d'une demande SANS l'enregistrer : disponibilité
+    réelle, conflits, créneaux et équipements alternatifs, statut que prendra
+    la demande (validée d'office ou en attente) et sa raison. C'est Django,
+    et non l'assistant, qui décide qu'un créneau est libre.
+    """
+    return await _agir("/reservations/verifier/", token, json=payload)
 
 
 async def creer_reservation(token: str, payload: dict) -> ResultatAction:

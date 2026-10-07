@@ -5,6 +5,7 @@ une intention se fait ici, à un seul endroit.
 """
 from enum import StrEnum
 
+from app.core.navigation import page_demandee
 from app.nlu.texte import contient_un
 
 
@@ -16,6 +17,8 @@ class Intention(StrEnum):
     MAINTENANCE = "maintenance"
     STATISTIQUES = "statistiques"
     CREER_EQUIPEMENT = "creer_equipement"
+    NAVIGUER = "naviguer"
+    MOTIF_REFUS = "motif_refus"
     MON_NOM = "mon_nom"
     IDENTITE = "identite"
     SALUTATION = "salutation"
@@ -28,10 +31,13 @@ class Intention(StrEnum):
 # réservations » serait capté par « reserv » (réserver) et « annule ma
 # réservation » aussi.
 MOTS_CLES_INTENTIONS: list[tuple[Intention, tuple[str, ...]]] = [
+    # « Pourquoi ma réservation a été refusée ? » : une explication, et
+    # surtout pas une annulation (« annul » est cherché plus bas).
+    (Intention.MOTIF_REFUS, ("refus", "pourquoi ma reservation", "pourquoi ma demande", "pourquoi mes reservations")),
     # Une question sur le FONCTIONNEMENT (« comment faire une réservation ? »)
     # n'est pas une demande d'action : elle ne doit pas lancer une réservation.
     (Intention.AUTRE, ("comment faire", "comment reserver", "comment annuler", "comment fonctionne",
-                       "comment ca marche", "comment on ", "c'est quoi", "qu'est-ce que", "qu'est ce que")),
+                       "comment ca marche", "comment on ")),
     (Intention.ANNULER, ("annule", "annuler", "annulation", "supprime ma reservation", "supprimer ma reservation")),
     (Intention.CONSULTER_MES_RESERVATIONS, ("mes reservations", "mes demandes", "prochaines reservations", "mon planning",
                                             "mes creneaux", "ma prochaine reservation", "ma derniere reservation")),
@@ -57,7 +63,19 @@ MOTS_DISPONIBILITE = ("dispo", "libre")  # « dispo » couvre disponible / dispo
 INTENTIONS_ACTION = {Intention.RESERVER, Intention.ANNULER, Intention.CREER_EQUIPEMENT}
 
 
+# « C'est quoi un thermocycleur ? » est une question générale, mais
+# « c'est quoi mes réservations ? » est bien une consultation.
+QUESTIONS_DEFINITION = ("c'est quoi", "qu'est-ce que", "qu'est ce que")
+POSSESSIFS = ("mes ", "ma ", "mon ")
+
+
 def intention_par_mots_cles(message_normalise: str) -> Intention:
+    # Une page de l'application explicitement demandée (« je veux gérer
+    # les laboratoires », « ajouter un équipement ») : voir app/core/navigation.py.
+    if page_demandee(message_normalise):
+        return Intention.NAVIGUER
+    if contient_un(message_normalise, QUESTIONS_DEFINITION) and not contient_un(message_normalise, POSSESSIFS):
+        return Intention.AUTRE
     for intention, mots_cles in MOTS_CLES_INTENTIONS:
         if contient_un(message_normalise, mots_cles):
             return intention

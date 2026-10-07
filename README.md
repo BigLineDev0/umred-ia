@@ -29,6 +29,29 @@ L'en-tête YAML ci-dessus configure le déploiement sur Hugging Face Spaces
 Tant que le modèle se charge, le service répond avec des règles (mode dégradé) ;
 `GET /health` indique `"modele": "mode_degrade"` puis `"charge"`.
 
+## Fonctionnement de l'assistant
+
+```
+message ─> NLU (règles + modèle, sortie JSON : une intention dans une liste fermée)
+        ─> routeur déterministe (app/assistant/dialogue.py)
+        ─> outils = appels à l'API Django avec le JWT de l'utilisateur (app/services/django_client.py)
+        ─> réponse structurée pour Angular : type, texte, boutons, actions de navigation, données
+```
+
+- **Django reste la source de vérité** : disponibilités, conflits, alternatives
+  (`POST /reservations/verifier/`), permissions et création. Le service IA n'a
+  aucun accès à la base de données.
+- **Le modèle ne produit jamais de route, d'identifiant ni de verdict** : il
+  reconnaît une intention ; dates et heures sont extraites par des règles.
+- **Navigation** : `app/core/navigation.py` recense les routes Angular réelles
+  et leurs rôles (miroir des `roleGuard`). Une page n'est proposée qu'aux rôles
+  qui peuvent l'ouvrir ; sinon l'assistant explique le refus et propose une
+  page alternative.
+- **Contexte** : une étape de dialogue à la fois (`session_store.py`) et une
+  petite mémoire du sujet en cours (dernier équipement / date) pour comprendre
+  « réserve-le » ou « le premier ».
+- **Mode dégradé** : sans modèle, les règles couvrent toutes les intentions.
+
 ## Développement local
 
 ```bash

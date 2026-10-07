@@ -3,6 +3,7 @@ from datetime import date, datetime, timedelta
 
 import dateparser
 
+from app.core import temps
 from app.nlu.texte import normaliser_texte
 
 # Les petits modèles écrivent parfois la CHAÎNE "null" au lieu du null JSON.
@@ -69,7 +70,7 @@ def normaliser_date(date_brute: str | None, aujourd_hui: date | None = None) -> 
     date_brute = valeur_ou_none(date_brute)
     if not date_brute:
         return None
-    aujourd_hui = aujourd_hui or date.today()
+    aujourd_hui = aujourd_hui or temps.aujourd_hui()
     try:
         return date.fromisoformat(date_brute).isoformat()
     except ValueError:

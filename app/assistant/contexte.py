@@ -68,9 +68,22 @@ def lire_choix(message_normalise: str, prefixe: str) -> int | None:
     return int(correspondance.group(1)) if correspondance else None
 
 
+ORDINAUX = {"premier": 1, "premiere": 1, "1er": 1, "deuxieme": 2, "second": 2, "seconde": 2, "2e": 2,
+            "troisieme": 3, "3e": 3, "quatrieme": 4, "4e": 4, "cinquieme": 5, "5e": 5}
+_ORDINAL = re.compile(r"^(?:le |la |l')?(?:choix |creneau |option |numero )?(\w+)(?: choix| creneau| option)?$")
+
+
 def lire_numero(message_normalise: str, nombre_choix: int) -> int | None:
-    """Permet aussi de répondre au clavier par « 1 », « 2 »... (index 0-based renvoyé)."""
+    """
+    Permet aussi de répondre au clavier par « 1 », « 2 »... ou « le premier »,
+    « le deuxième », « le dernier » (index 0-based renvoyé).
+    """
     texte = _sans_ponctuation(message_normalise)
-    if texte.isdigit() and 1 <= int(texte) <= nombre_choix:
-        return int(texte) - 1
+    correspondance = _ORDINAL.match(texte)
+    mot = correspondance.group(1) if correspondance else texte
+    if mot == "dernier" or mot == "derniere":
+        return nombre_choix - 1 if nombre_choix else None
+    numero = int(mot) if mot.isdigit() else ORDINAUX.get(mot)
+    if numero is not None and 1 <= numero <= nombre_choix:
+        return numero - 1
     return None
