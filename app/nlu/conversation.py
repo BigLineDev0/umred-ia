@@ -6,12 +6,14 @@ logger = logging.getLogger(__name__)
 
 MESSAGE_AIDE = (
     "Je peux vous aider à :\n"
-    "- réserver un équipement (« Réserve le microscope demain de 10h à 12h »)\n"
-    "- consulter vos réservations ou les disponibilités\n"
-    "- annuler une réservation\n"
-    "- connaître la prochaine maintenance d'un équipement\n"
-    "- vous ouvrir la bonne page (« Je veux ajouter un équipement », « Je veux gérer les laboratoires »)"
+    "- réserver un équipement ou vérifier une disponibilité\n"
+    "- consulter ou annuler vos réservations\n"
+    "- suivre la maintenance d'un équipement\n"
+    "- ouvrir la bonne page de la plateforme"
 )
+
+# Réponse quand le modèle ne peut pas répondre : l'aide statique.
+REPONSE_REPLI = f"Je n'ai pas bien compris votre demande. {MESSAGE_AIDE}"
 
 CONVERSATION_SYSTEM_PROMPT = """Tu es l'assistant virtuel de SenLab, la plateforme de gestion des laboratoires
 de recherche d'une université à Thiès, au Sénégal. Tu t'adresses à des étudiants, enseignants-chercheurs,
@@ -51,4 +53,4 @@ async def repondre_conversationnel(message: str, historique: list[dict[str, str]
     except Exception:
         logger.exception("Erreur lors de la génération conversationnelle")
         contenu = ""
-    return contenu or f"Je n'ai pas bien compris votre demande. {MESSAGE_AIDE}"
+    return contenu or REPONSE_REPLI

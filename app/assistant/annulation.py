@@ -7,7 +7,9 @@ appartient avant d'annuler.
 from rapidfuzz import fuzz
 
 from app.assistant.contexte import Contexte, est_non, est_oui, lire_choix, lire_numero, options_confirmation
-from app.assistant.formatage import formater_date, formater_heure, formater_plage, resume_reservation
+from app.assistant.formatage import (
+    formater_creneau, formater_date, formater_date_titre, formater_heure, formater_plage,
+)
 from app.core.session_store import Etape, definir_etape, terminer_etape
 from app.nlu.texte import contient_un, normaliser_texte
 from app.schemas.chat import ChatOption, ChatResponse, DetailsConfirmation
@@ -56,12 +58,15 @@ async def gerer_annulation(ctx: Contexte) -> ChatResponse:
 def _proposer_choix(ctx: Contexte, reservations: list[dict], introduction: str) -> ChatResponse:
     proposees = reservations[:NOMBRE_MAX_CHOIX]
     definir_etape(ctx.session, Etape.SELECTION_ANNULATION, reservations=proposees)
-    lignes = [introduction] + [f"{i}. {resume_reservation(r)}" for i, r in enumerate(proposees, start=1)]
+    # Chaque réservation est un bouton (date et horaire en titre,
+    # équipements en sous-titre) : le texte se limite à la question.
     options = [
-        ChatOption(label=f"{formater_date(r['date'])} {formater_plage(r['heure_debut'], r['heure_fin'])}", value=f"annul_{r['id']}")
+        ChatOption(label=f"{formater_date_titre(r['date'])} · {formater_creneau(r['heure_debut'], r['heure_fin'])}",
+                   value=f"annul_{r['id']}",
+                   description=", ".join(r.get("equipements_noms") or []) or r.get("laboratoire_nom"))
         for r in proposees
     ]
-    return ChatResponse(reponse="\n".join(lignes), options=options)
+    return ChatResponse(reponse=introduction, options=options)
 
 
 async def traiter_selection(ctx: Contexte) -> ChatResponse | None:

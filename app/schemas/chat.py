@@ -5,10 +5,15 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class ChatOption(BaseModel):
-    """Bouton cliquable : le frontend affiche `label` et renvoie `value`."""
+    """
+    Bouton cliquable : le frontend affiche `label` (et `description` en
+    sous-titre s'il y en a une) et renvoie `value`. Les détails vont dans
+    la description plutôt que dans le texte, pour ne pas les répéter.
+    """
 
     label: str
     value: str
+    description: Optional[str] = None
 
 
 _ROUTE_INTERNE = re.compile(r"/[A-Za-z0-9/_-]*")

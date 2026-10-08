@@ -20,7 +20,9 @@ from datetime import datetime
 from typing import Any
 
 from app.assistant.contexte import Contexte, est_non, est_oui, lire_choix, lire_numero, options_confirmation
-from app.assistant.formatage import formater_date, formater_heure, formater_liste, formater_plage
+from app.assistant.formatage import (
+    formater_creneau, formater_date, formater_date_titre, formater_heure, formater_liste, formater_plage,
+)
 from app.assistant.navigation import actions_pages
 from app.core import temps
 from app.core.constantes import STATUTS_EQUIPEMENT_NON_RESERVABLES
@@ -299,12 +301,13 @@ async def _proposer_creneaux(ctx: Contexte, brouillon: dict, remarques: list[str
                                               "Souhaitez-vous une autre date ou un autre moment de la journée ?"]),
                             data={"equipement": nom, "date": date_iso, "creneaux": []})
 
-    propositions = formater_liste([f"{formater_heure(d)}–{formater_heure(f)}" for d, f in creneaux], "ou")
-    question = f"Quel créneau souhaitez-vous pour {nom} {quand} : {propositions} ? Vous pouvez aussi indiquer {exemple}"
+    # Les créneaux sont dans les boutons : la phrase ne les énumère pas.
+    question = (f"Choisissez un créneau pour {nom} {quand}, ou indiquez l'heure de début et de fin "
+                f"(ex. « de 10h à 12h »).")
     return ChatResponse(
         type="clarification", intention=Intention.RESERVER,
         reponse=" ".join([*remarques, question]),
-        options=[ChatOption(label=f"{formater_heure(d)} – {formater_heure(f)}", value=f"creneau_{i}") for i, (d, f) in enumerate(creneaux)],
+        options=[ChatOption(label=formater_creneau(d, f), value=f"creneau_{i}") for i, (d, f) in enumerate(creneaux)],
         data={"equipement": nom, "date": date_iso, "creneaux": [{"debut": d, "fin": f} for d, f in creneaux]},
     )
 
@@ -320,15 +323,17 @@ async def _demander_selection_equipement(ctx: Contexte, creneau: dict, resolus: 
     libres = await asyncio.gather(*(
         est_disponible(ctx.token, c["id"], creneau["date"], creneau["heure_debut"], creneau["heure_fin"]) for c in candidats
     ))
-    lignes, options = [], []
-    for i, (c, libre) in enumerate(zip(candidats, libres), start=1):
-        statut = "disponible" if libre else "déjà réservé sur ce créneau"
-        lignes.append(f"{i}. {c['nom']} ({c['laboratoire_nom']}) — {statut}")
-        options.append(ChatOption(label=f"{c['nom']} ({c['laboratoire_nom']})", value=f"equip_{c['id']}"))
+    # Le laboratoire et la disponibilité vont en sous-titre des boutons :
+    # le texte reste une seule question, sans répéter la liste.
+    options = [
+        ChatOption(label=c["nom"], value=f"equip_{c['id']}",
+                   description=f"{c['laboratoire_nom']} · {'disponible' if libre else 'déjà réservé sur ce créneau'}")
+        for c, libre in zip(candidats, libres)
+    ]
 
     definir_etape(ctx.session, Etape.SELECTION_EQUIPEMENT, creneau=creneau, resolus=resolus, ambigues=ambigues)
     return ChatResponse(
-        reponse=f"Plusieurs équipements correspondent à « {famille} » :\n" + "\n".join(lignes) + "\n\nLequel souhaitez-vous réserver ?",
+        reponse=f"Plusieurs équipements correspondent à « {famille} ». Lequel souhaitez-vous réserver ?",
         options=options,
     )
 
@@ -388,7 +393,8 @@ async def proposer_confirmation(ctx: Contexte, creneau: dict, equipements: list[
     # continue, la création revérifiera tout de toute façon.
     information = []
     if verification.ok and verification.data.get("statut_prevu") == "EN_ATTENTE":
-        information.append(f"ℹ️ Cette demande sera soumise à validation. {verification.data.get('raison_statut') or ''}".strip())
+        raison = (verification.data.get("raison_statut") or "").strip()
+        information.append(f"ℹ️ Demande soumise à validation{' : ' + raison[:1].lower() + raison[1:] if raison else '.'}")
 
     definir_etape(ctx.session, Etape.CONFIRMATION_RESERVATION, reservation=reservation, equipements=equipements)
     memoriser(ctx.session, equipement=equipements[0] if len(equipements) == 1 else None, date=creneau["date"])
@@ -458,6 +464,17 @@ async def _finaliser_reservation(ctx: Contexte) -> ChatResponse:
 # 4. Conflit de planning : alternatives proposées par Django
 # ---------------------------------------------------------------------------
 
+def _phrase_conflit(reservation: dict, conflits: list[dict]) -> str:
+    """« Thermocycleur PCR est déjà réservé demain (vendredi 9 octobre), de 9h à 11h. »"""
+    jour = formater_date(reservation["date"])
+    if len(conflits) == 1:
+        c = conflits[0]
+        return f"{c['equipement']} est déjà réservé {jour}, {formater_plage(c['heure_debut'], c['heure_fin'])}."
+    occupes = formater_liste(sorted({c["equipement"] for c in conflits}))
+    plage = formater_plage(reservation["heure_debut"], reservation["heure_fin"])
+    return f"Ce créneau est déjà pris {jour}, {plage}" + (f" : {occupes} sont occupés." if conflits else ".")
+
+
 def proposer_alternatives(
     ctx: Contexte, reservation: dict, equipements: list[dict], conflit: dict, introduction: str | None = None,
 ) -> ChatResponse:
@@ -469,34 +486,32 @@ def proposer_alternatives(
     # Chaque équivalent indique l'équipement qu'il remplace ('remplace').
     equivalents = alternatives.get("equipements_equivalents", [])
 
-    lignes = [introduction or f"Ce créneau est déjà pris ({formater_date(reservation['date'])} "
-                              f"{formater_plage(reservation['heure_debut'], reservation['heure_fin'])})."]
-    for c in conflit.get("conflits", []):
-        lignes.append(f"- {c['equipement']} est réservé de {formater_plage(c['heure_debut'], c['heure_fin'])}")
+    phrase = introduction or _phrase_conflit(reservation, conflit.get("conflits", []))
 
-    options = []
-    if memes:
-        lignes.append("\nCréneaux proposés :")
-        for i, alt in enumerate(memes):
-            quand = f"{formater_date(alt['date'])} {formater_plage(alt['heure_debut'], alt['heure_fin'])}"
-            lignes.append(f"- {alt.get('message') or quand}")
-            options.append(ChatOption(label=quand, value=f"alt_{i}"))
-    if equivalents:
-        lignes.append("\nÉquipements équivalents libres au même moment :")
-        for equiv in equivalents:
-            lignes.append(f"- {equiv['nom']}" + (f" (à la place de {equiv['remplace_nom']})" if equiv.get('remplace_nom') else ""))
-            options.append(ChatOption(label=equiv["nom"], value=f"equiv_{equiv['id']}"))
+    # Les alternatives sont les boutons eux-mêmes (créneau en titre, jour
+    # ou équipement remplacé en sous-titre) : le texte ne les répète pas.
+    options = [
+        ChatOption(label=formater_creneau(alt["heure_debut"], alt["heure_fin"]), value=f"alt_{i}",
+                   description=formater_date_titre(alt["date"]))
+        for i, alt in enumerate(memes)
+    ] + [
+        ChatOption(label=equiv["nom"], value=f"equiv_{equiv['id']}",
+                   description=(f"À la place de {equiv['remplace_nom']}, même créneau"
+                                if equiv.get("remplace_nom") else "Même créneau"))
+        for equiv in equivalents
+    ]
 
     if not options:
         terminer_etape(ctx.session)
-        lignes.append("\nAucune alternative n'est disponible dans les prochains jours - contactez un technicien.")
-        return ChatResponse(type="availability", reponse="\n".join(lignes), data={"disponible": False, "alternatives": []})
+        return ChatResponse(type="availability", data={"disponible": False, "alternatives": []},
+                            reponse=f"{phrase} Aucune alternative n'est disponible dans les prochains jours : "
+                                    "contactez un technicien.")
 
     definir_etape(ctx.session, Etape.SELECTION_ALTERNATIVE, reservation=reservation, equipements=equipements,
                   alternatives=memes, equivalents=equivalents)
     # Les alternatives sont celles calculées par Django : l'assistant se
     # contente de les présenter.
-    return ChatResponse(type="availability", reponse="\n".join(lignes), options=options,
+    return ChatResponse(type="availability", reponse=f"{phrase} Voici d'autres possibilités :", options=options,
                         data={"disponible": False, "alternatives": memes})
 
 

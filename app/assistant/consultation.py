@@ -12,10 +12,10 @@ from app.core.constantes import (
     STATUTS_EQUIPEMENT_NON_RESERVABLES, Role,
 )
 from app.core.security import Utilisateur
-from app.nlu.conversation import MESSAGE_AIDE, repondre_conversationnel
+from app.nlu.conversation import MESSAGE_AIDE, REPONSE_REPLI, repondre_conversationnel
 from app.nlu.domaine import concerne_le_labo
 from app.nlu.texte import contient_un, normaliser_texte
-from app.schemas.chat import ChatAction, ChatResponse
+from app.schemas.chat import ChatAction, ChatOption, ChatResponse
 from app.services.disponibilite import bornes_semaine
 from app.services.django_client import get_equipements, get_maintenances, get_reservations
 from app.services.matching import resoudre_equipement
@@ -48,13 +48,24 @@ async def presenter_assistant(ctx: Contexte) -> ChatResponse:
     ))
 
 
+# Réponses rapides : la valeur est envoyée comme un message tapé.
+SUGGESTIONS_AIDE = [
+    ChatOption(label="Réserver un équipement", value="Je veux réserver un équipement"),
+    ChatOption(label="Voir les disponibilités", value="Quels équipements sont disponibles aujourd'hui ?"),
+    ChatOption(label="Mes réservations", value="Quelles sont mes prochaines réservations ?"),
+]
+
+
 async def repondre_autre(ctx: Contexte) -> ChatResponse:
     # Le message parle du labo sans être une commande reconnue : on montre
     # l'aide plutôt que de laisser le modèle improviser une procédure.
     if concerne_le_labo(ctx.message):
-        return ChatResponse(reponse=f"Je ne suis pas certain de bien comprendre votre demande. {MESSAGE_AIDE}",
+        return ChatResponse(reponse=f"Je ne suis pas certain de bien comprendre. {MESSAGE_AIDE}",
+                            options=SUGGESTIONS_AIDE,
                             actions=actions_pages(ctx.user.role, "reservation_formulaire", "mes_reservations"))
-    return ChatResponse(reponse=await repondre_conversationnel(ctx.message, ctx.session["historique"]))
+    reponse = await repondre_conversationnel(ctx.message, ctx.session["historique"])
+    # Sans modèle, la réponse est l'aide statique : on y joint les réponses rapides.
+    return ChatResponse(reponse=reponse, options=SUGGESTIONS_AIDE if reponse == REPONSE_REPLI else None)
 
 
 # --- Réservations ---

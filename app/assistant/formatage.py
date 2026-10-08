@@ -30,6 +30,17 @@ def formater_date(iso: str, aujourd_hui: date | None = None) -> str:
     return texte
 
 
+def formater_date_titre(iso: str, aujourd_hui: date | None = None) -> str:
+    """Même chose que formater_date, avec une majuscule (sous-titre de bouton)."""
+    texte = formater_date(iso, aujourd_hui)
+    return texte[:1].upper() + texte[1:]
+
+
+def formater_creneau(debut: str, fin: str) -> str:
+    """« 9h – 11h » : libellé court d'un créneau (bouton)."""
+    return f"{formater_heure(debut)} – {formater_heure(fin)}"
+
+
 def formater_heure(heure: str) -> str:
     """« 14:00:00 » -> « 14h », « 09:30 » -> « 9h30 »."""
     heures, minutes = str(heure)[:5].split(":")

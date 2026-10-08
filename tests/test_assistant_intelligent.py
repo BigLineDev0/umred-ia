@@ -146,7 +146,7 @@ def test_conflit_detecte_avant_confirmation_avec_alternatives_django(envoyer, dj
     })
     rep = envoyer("Réserve le PCR demain de 9h à 11h")
     assert rep["necessite_confirmation"] is False
-    assert "déjà pris" in rep["reponse"]
+    assert "Thermocycleur PCR est déjà réservé" in rep["reponse"]
     assert [o["value"] for o in rep["options"]] == ["alt_0", "alt_1"]
     assert django.appels_post("/reservations/") == []
 
@@ -353,3 +353,19 @@ def test_heure_de_l_etablissement_et_non_du_serveur():
     from app.core import temps
     attendu = datetime.now(ZoneInfo("Africa/Dakar")).replace(tzinfo=None)
     assert abs(temps.maintenant() - attendu) < timedelta(seconds=5)
+
+
+def test_reponses_concises_details_dans_les_boutons(envoyer, django):
+    """Le texte ne répète pas la liste : les détails sont en sous-titre des boutons."""
+    rep = envoyer("Réserve le microscope demain de 14h à 16h")
+    assert "\n" not in rep["reponse"]
+    assert [o["description"] for o in rep["options"]] == ["Labo Biologie · disponible"] * 2
+
+    rep = envoyer("Quels équipements sont disponibles demain ?", session_id="session-test-2")
+    assert "\n" not in rep["reponse"]
+    assert all("Labo" in o["description"] for o in rep["options"])
+
+
+def test_aide_propose_des_reponses_rapides(envoyer, django):
+    rep = envoyer("Je ne comprends pas le labo")
+    assert [o["label"] for o in rep["options"]][:1] == ["Réserver un équipement"]

@@ -7,6 +7,7 @@ Questions de disponibilité. Deux cas :
   plages libres calculées à partir des réservations renvoyées par Django.
 """
 import asyncio
+from datetime import date
 
 from app.assistant.contexte import Contexte, lire_choix
 from app.assistant.formatage import formater_date, formater_heure, formater_plage
@@ -29,6 +30,17 @@ APPELS_DJANGO_SIMULTANES = 5          # parallélisme borné pour ne pas saturer
 
 def _formater_creneaux(creneaux: list[tuple[str, str]]) -> str:
     return ", ".join(f"{formater_heure(d)}–{formater_heure(f)}" for d, f in creneaux) or "aucun créneau libre"
+
+
+def _est_ferme(horaires: dict, jour_iso: str) -> bool:
+    """Le jour est-il un jour de fermeture de l'établissement ?"""
+    par_jour = horaires.get("horaires_jour") or {}
+    return bool(par_jour.get(date.fromisoformat(jour_iso).weekday(), (False,))[0])
+
+
+def _libelle_jour(horaires: dict, jour_iso: str, creneaux: list[tuple[str, str]]) -> str:
+    # « fermé » plutôt que « aucun créneau libre » : ce n'est pas un planning plein.
+    return "fermé" if _est_ferme(horaires, jour_iso) else _formater_creneaux(creneaux)
 
 
 async def consulter_disponibilite(ctx: Contexte) -> ChatResponse:
@@ -92,7 +104,7 @@ async def _disponibilites_equipement(ctx: Contexte, equipement: dict) -> ChatRes
         # « Demain matin » : seules les plages du matin nous intéressent.
         fenetre = fenetre_moment(ext.moment, **enveloppe(horaires))
         libres = {j: restreindre(c, fenetre) for j, c in libres.items()}
-    lignes = [f"- {formater_date(j)} : {_formater_creneaux(c)}" for j, c in libres.items()]
+    lignes = [f"- {formater_date(j)} : {_libelle_jour(horaires, j, c)}" for j, c in libres.items()]
     donnees = {"equipement": equipement["nom"], "disponible": any(libres.values()),
                "creneaux": [{"date": j, "debut": d, "fin": f} for j, c in libres.items() for d, f in c]}
 
@@ -107,6 +119,8 @@ async def _disponibilites_equipement(ctx: Contexte, equipement: dict) -> ChatRes
     if len(jours) == 1:
         introduction = (f"Oui, {equipement['nom']} ({equipement['laboratoire_nom']}) est libre {formater_date(jours[0])}{moment} :"
                         if libres[jours[0]] else
+                        f"L'établissement est fermé {formater_date(jours[0])} : aucune réservation possible."
+                        if _est_ferme(horaires, jours[0]) else
                         f"Non, {equipement['nom']} ({equipement['laboratoire_nom']}) n'a aucun créneau libre {formater_date(jours[0])}{moment}.")
         lignes = [f"- {_formater_creneaux(libres[jours[0]])}"] if libres[jours[0]] else []
     else:
@@ -135,23 +149,26 @@ async def _lister_equipements_disponibles(ctx: Contexte, equipements: list[dict]
         tous_les_creneaux = [restreindre(c, fenetre) for c in tous_les_creneaux]
     disponibles = [(e, c) for e, c in zip(reservables, tous_les_creneaux) if c]
     if not disponibles:
+        if _est_ferme(horaires, date_iso):
+            return ChatResponse(reponse=f"L'établissement est fermé {formater_date(date_iso)} : aucune réservation possible.")
         return ChatResponse(reponse=f"Aucun équipement n'a de créneau libre {formater_date(date_iso)}.")
 
     affiches = disponibles[:NOMBRE_MAX_EQUIPEMENTS_AFFICHES]
-    lignes = [f"Équipements disponibles {formater_date(date_iso)} :"]
-    lignes += [f"- {e['nom']} ({e['laboratoire_nom']}) : {_formater_creneaux(c)}" for e, c in affiches]
+    # Une phrase courte : chaque équipement est un bouton (laboratoire et
+    # créneaux libres en sous-titre), inutile de les lister aussi ici.
+    reponse = f"Équipements disponibles {formater_date(date_iso)}. Choisissez-en un pour le réserver."
     if len(disponibles) > len(affiches):
-        lignes.append(f"… et {len(disponibles) - len(affiches)} autre(s). Précisez un équipement pour affiner.")
-    lignes.append("\nCliquez sur un équipement pour le réserver.")
+        reponse += f" ({len(disponibles) - len(affiches)} autre(s) non affiché(s) : précisez un équipement pour affiner.)"
 
     # On mémorise la date et la liste proposée côté serveur : le bouton ne
     # transporte que l'id, qui est vérifié à la réception (pas de date ni
     # d'équipement arbitraire injectable par le client).
     definir_etape(ctx.session, Etape.SELECTION_DISPONIBILITE, date=date_iso, equipements={e["id"]: e for e, _ in affiches})
-    options = [ChatOption(label=f"{e['nom']} — {e['laboratoire_nom']}", value=f"dispo_{e['id']}") for e, _ in affiches]
+    options = [ChatOption(label=e["nom"], value=f"dispo_{e['id']}",
+                          description=f"{e['laboratoire_nom']} · {_formater_creneaux(c)}") for e, c in affiches]
     donnees = [{"equipement": e["nom"], "laboratoire": e["laboratoire_nom"], "date": date_iso,
                 "creneaux": [{"debut": d, "fin": f} for d, f in c]} for e, c in affiches]
-    return ChatResponse(type="availability", reponse="\n".join(lignes), options=options, data=donnees)
+    return ChatResponse(type="availability", reponse=reponse, options=options, data=donnees)
 
 
 async def traiter_selection_disponibilite(ctx: Contexte) -> ChatResponse | None:
