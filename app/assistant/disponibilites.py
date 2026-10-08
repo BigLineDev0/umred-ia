@@ -18,7 +18,7 @@ from app.core.constantes import STATUTS_EQUIPEMENT_NON_RESERVABLES
 from app.core.session_store import Etape, definir_etape, memoriser
 from app.schemas.chat import ChatOption, ChatResponse
 from app.services.disponibilite import (
-    LIBELLES_MOMENTS, calculer_creneaux_libres, fenetre_moment, jours_de_la_periode, restreindre,
+    LIBELLES_MOMENTS, calculer_creneaux_libres, enveloppe, fenetre_moment, jours_de_la_periode, restreindre,
 )
 from app.services.django_client import get_creneaux_occupes, get_equipements, verifier_reservation
 from app.services.matching import resoudre_equipement
@@ -90,7 +90,7 @@ async def _disponibilites_equipement(ctx: Contexte, equipement: dict) -> ChatRes
     libres = calculer_creneaux_libres(occupes, jours, **horaires)
     if ext.moment:
         # « Demain matin » : seules les plages du matin nous intéressent.
-        fenetre = fenetre_moment(ext.moment, **horaires)
+        fenetre = fenetre_moment(ext.moment, **enveloppe(horaires))
         libres = {j: restreindre(c, fenetre) for j, c in libres.items()}
     lignes = [f"- {formater_date(j)} : {_formater_creneaux(c)}" for j, c in libres.items()]
     donnees = {"equipement": equipement["nom"], "disponible": any(libres.values()),
@@ -131,7 +131,7 @@ async def _lister_equipements_disponibles(ctx: Contexte, equipements: list[dict]
 
     tous_les_creneaux = await asyncio.gather(*(creneaux_libres(e) for e in reservables))
     if ctx.extraction.moment:
-        fenetre = fenetre_moment(ctx.extraction.moment, **horaires)
+        fenetre = fenetre_moment(ctx.extraction.moment, **enveloppe(horaires))
         tous_les_creneaux = [restreindre(c, fenetre) for c in tous_les_creneaux]
     disponibles = [(e, c) for e, c in zip(reservables, tous_les_creneaux) if c]
     if not disponibles:

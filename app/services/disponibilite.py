@@ -13,6 +13,7 @@ HEURE_FERMETURE = "19:00"
 def calculer_creneaux_libres(
     occupes: list[dict], jours: list[str], maintenant: datetime | None = None,
     ouverture: str = HEURE_OUVERTURE, fermeture: str = HEURE_FERMETURE,
+    horaires_jour: dict[int, tuple[bool, str, str]] | None = None,
 ) -> dict[str, list[tuple[str, str]]]:
     """
     Calcul par différence (« balayage ») : pour chaque jour on part de
@@ -26,25 +27,39 @@ def calculer_creneaux_libres(
 
     Pour aujourd'hui, le curseur démarre à l'heure actuelle : on ne propose
     jamais un créneau déjà passé.
+
+    `horaires_jour` (optionnel) donne, par jour de la semaine (0 = lundi),
+    (ferme, ouverture, fermeture) : un jour fermé ne renvoie aucun créneau,
+    et chaque jour utilise sa propre plage. Sans lui, les mêmes `ouverture`
+    et `fermeture` s'appliquent à tous les jours.
     """
     maintenant = maintenant or temps.maintenant()
     aujourd_hui, heure_actuelle = maintenant.date().isoformat(), maintenant.strftime("%H:%M")
 
     resultat: dict[str, list[tuple[str, str]]] = {}
     for jour in jours:
+        ouv, ferm = ouverture, fermeture
+        if horaires_jour:
+            ferme_jour, ouv_jour, ferm_jour = horaires_jour.get(
+                date.fromisoformat(jour).weekday(), (False, ouverture, fermeture)
+            )
+            if ferme_jour:
+                resultat[jour] = []
+                continue
+            ouv, ferm = ouv_jour, ferm_jour
         if jour < aujourd_hui:
             resultat[jour] = []
             continue
         occupes_du_jour = sorted((o for o in occupes if str(o["date"]) == jour), key=lambda o: o["heure_debut"])
-        curseur = max(ouverture, heure_actuelle) if jour == aujourd_hui else ouverture
+        curseur = max(ouv, heure_actuelle) if jour == aujourd_hui else ouv
         libres = []
         for creneau in occupes_du_jour:
             debut, fin = creneau["heure_debut"][:5], creneau["heure_fin"][:5]
             if debut > curseur:
-                libres.append((curseur, min(debut, fermeture)))
+                libres.append((curseur, min(debut, ferm)))
             curseur = max(curseur, fin)
-        if curseur < fermeture:
-            libres.append((curseur, fermeture))
+        if curseur < ferm:
+            libres.append((curseur, ferm))
         resultat[jour] = [(d, f) for d, f in libres if d < f]
     return resultat
 
@@ -92,6 +107,11 @@ def bornes_semaine(periode: str, depart: date | None = None) -> tuple[str, str]:
 # l'établissement (un labo qui ouvre à 7h30 a un « matin » de 7h30 à 12h).
 MOMENTS = {"matin": ("00:00", "12:00"), "apres_midi": ("14:00", "23:59"), "soir": ("17:00", "23:59"), "journee": ("00:00", "23:59")}
 LIBELLES_MOMENTS = {"matin": "le matin", "apres_midi": "l'après-midi", "soir": "en fin de journée", "journee": "sur la journée"}
+
+
+def enveloppe(horaires: dict) -> dict:
+    """Ne garde que ouverture/fermeture d'un dict d'horaires (pour fenetre_moment)."""
+    return {cle: horaires[cle] for cle in ('ouverture', 'fermeture') if cle in horaires}
 
 
 def fenetre_moment(moment: str | None, ouverture: str = HEURE_OUVERTURE, fermeture: str = HEURE_FERMETURE) -> tuple[str, str]:

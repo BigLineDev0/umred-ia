@@ -28,8 +28,8 @@ from app.core.session_store import Etape, definir_etape, memoriser, terminer_eta
 from app.nlu.intentions import Intention
 from app.schemas.chat import ChatOption, ChatResponse, DetailsConfirmation
 from app.services.disponibilite import (
-    LIBELLES_MOMENTS, calculer_creneaux_libres, decouper_en_creneaux, est_disponible, fenetre_moment,
-    jours_de_la_periode, restreindre,
+    LIBELLES_MOMENTS, calculer_creneaux_libres, decouper_en_creneaux, enveloppe, est_disponible,
+    fenetre_moment, jours_de_la_periode, restreindre,
 )
 from app.services.django_client import (
     creer_reservation, get_alerte_usure, get_creneaux_occupes, get_equipements, get_horaires, get_reservations,
@@ -177,8 +177,17 @@ def _verifier_coherence(brouillon: dict[str, Any], maintenant: datetime) -> list
 
 
 async def horaires_etablissement(ctx: Contexte) -> dict:
+    """
+    {"ouverture", "fermeture", "horaires_jour"} : l'enveloppe globale (pour
+    restreindre un moment de la journée) et la carte par jour de la semaine
+    (jour fermé / plage propre à chaque jour), transmise à
+    calculer_creneaux_libres. Vide si les horaires sont indisponibles.
+    """
     horaires = await get_horaires(ctx.token)
-    return {"ouverture": horaires[0], "fermeture": horaires[1]} if horaires else {}
+    if not horaires:
+        return {}
+    ouverture, fermeture, par_jour = horaires
+    return {"ouverture": ouverture, "fermeture": fermeture, "horaires_jour": par_jour}
 
 
 async def avancer_reservation(ctx: Contexte, brouillon: dict[str, Any]) -> ChatResponse:
@@ -216,7 +225,7 @@ async def avancer_reservation(ctx: Contexte, brouillon: dict[str, Any]) -> ChatR
     # « Toute la journée » : de l'ouverture à la fermeture de l'établissement.
     if brouillon["moment"] == "journee" and brouillon["date"] and not brouillon["heure_debut"]:
         horaires = await horaires_etablissement(ctx)
-        brouillon["heure_debut"], brouillon["heure_fin"] = fenetre_moment("journee", **horaires)
+        brouillon["heure_debut"], brouillon["heure_fin"] = fenetre_moment("journee", **enveloppe(horaires))
 
     # --- Informations manquantes : une question à la fois ---
     if not par_famille:
@@ -279,7 +288,7 @@ async def _proposer_creneaux(ctx: Contexte, brouillon: dict, remarques: list[str
     horaires = await horaires_etablissement(ctx)
     occupes = await get_creneaux_occupes(ctx.token, equipement["id"], date_iso, date_iso)
     libres = calculer_creneaux_libres(occupes, [date_iso], temps.maintenant(), **horaires)[date_iso]
-    libres = restreindre(libres, fenetre_moment(brouillon["moment"], **horaires))
+    libres = restreindre(libres, fenetre_moment(brouillon["moment"], **enveloppe(horaires)))
     creneaux = decouper_en_creneaux(libres, DUREE_CRENEAU_PROPOSE)
     quand = f"{formater_date(date_iso)}" + (f" {LIBELLES_MOMENTS[brouillon['moment']]}" if brouillon["moment"] else "")
 

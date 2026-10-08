@@ -163,15 +163,21 @@ async def get_creneaux_occupes(token: str, equipement_id: int, date_debut: str, 
     return [c for c in creneaux if c.get("statut", "VALIDEE") in STATUTS_BLOQUANTS]
 
 
-async def get_horaires(token: str) -> tuple[str, str] | None:
+async def get_horaires(token: str) -> tuple[str, str, dict[int, tuple[bool, str, str]]] | None:
     """
     Horaires d'ouverture configurés par l'établissement (SaaS : chacun a
-    les siens). Information de confort : en cas d'échec, l'appelant garde
-    les horaires par défaut.
+    les siens). Renvoie (ouverture_globale, fermeture_globale, horaires_par_jour)
+    où horaires_par_jour = {jour_semaine: (ferme, ouverture, fermeture)}
+    (jour 0 = lundi). Information de confort : en cas d'échec, l'appelant
+    garde les horaires par défaut.
     """
     try:
         organisation = await _lire("/organisations/courante/", token)
-        return organisation["heure_ouverture"][:5], organisation["heure_fermeture"][:5]
+        par_jour = {
+            h["jour"]: (bool(h.get("ferme")), h["heure_ouverture"][:5], h["heure_fermeture"][:5])
+            for h in organisation.get("horaires") or []
+        }
+        return organisation["heure_ouverture"][:5], organisation["heure_fermeture"][:5], par_jour
     except Exception:
         logger.warning("Horaires de l'établissement indisponibles : horaires par défaut utilisés.")
         return None

@@ -128,3 +128,17 @@ def test_modele_non_sollicite_quand_les_regles_suffisent(monkeypatch):
     assert asyncio.run(extractor.extraire("Réserve le microscope demain à 10h")).intention == Intention.RESERVER
     resultat = asyncio.run(extractor.extraire("demain de 10h à 12h", reservation_en_cours=True))
     assert (resultat.heure_debut, resultat.heure_fin) == ("10:00", "12:00")
+
+
+def test_creneaux_jour_ferme_aucun_creneau():
+    # 2026-10-11 = dimanche (weekday 6) ; marqué fermé -> aucun créneau.
+    libres = calculer_creneaux_libres([], ["2026-10-11"], maintenant=datetime(2026, 10, 7, 8),
+                                      horaires_jour={6: (True, "08:00", "19:00")})
+    assert libres["2026-10-11"] == []
+
+
+def test_creneaux_horaire_specifique_du_jour():
+    # 2026-10-10 = samedi (weekday 5), ouvert seulement 08:00-12:00.
+    libres = calculer_creneaux_libres([], ["2026-10-10"], maintenant=datetime(2026, 10, 7, 8),
+                                      horaires_jour={5: (False, "08:00", "12:00")})
+    assert libres["2026-10-10"] == [("08:00", "12:00")]
