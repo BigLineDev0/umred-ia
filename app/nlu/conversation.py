@@ -13,7 +13,7 @@ MESSAGE_AIDE = (
     "- vous ouvrir la bonne page (« Je veux ajouter un équipement », « Je veux gérer les laboratoires »)"
 )
 
-CONVERSATION_SYSTEM_PROMPT = """Tu es l'assistant virtuel de UMRED Labo, la plateforme de gestion des laboratoires
+CONVERSATION_SYSTEM_PROMPT = """Tu es l'assistant virtuel de SenLab, la plateforme de gestion des laboratoires
 de recherche d'une université à Thiès, au Sénégal. Tu t'adresses à des étudiants, enseignants-chercheurs,
 techniciens et administrateurs.
 

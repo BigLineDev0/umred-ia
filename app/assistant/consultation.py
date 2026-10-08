@@ -41,7 +41,7 @@ async def donner_nom(ctx: Contexte) -> ChatResponse:
 
 async def presenter_assistant(ctx: Contexte) -> ChatResponse:
     return ChatResponse(reponse=(
-        "Je suis l'assistant virtuel de UMRED. Je peux vous aider à réserver des équipements, "
+        "Je suis l'assistant virtuel de SenLab. Je peux vous aider à réserver des équipements, "
         "consulter vos réservations et les disponibilités, suivre les maintenances et vous orienter vers "
         "la bonne page de la plateforme selon votre rôle. "
         "J'ai été développé par Aliou Diallo dans le cadre de son projet de certification à Simplon Sénégal."

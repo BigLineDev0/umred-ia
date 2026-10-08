@@ -37,7 +37,7 @@ from app.services.django_client import (
 )
 from app.services.matching import equipements_mentionnes
 
-MOTIF_PAR_DEFAUT = "Réservation via l'assistant UMRED"
+MOTIF_PAR_DEFAUT = "Réservation via l'assistant SenLab"
 # Pendant la collecte, un message reconnu comme l'une de ces intentions
 # complète la demande en cours ; toute autre intention l'abandonne.
 INTENTIONS_COMPATIBLES_COLLECTE = {Intention.RESERVER, Intention.AUTRE, Intention.CONSULTER_DISPONIBILITE}

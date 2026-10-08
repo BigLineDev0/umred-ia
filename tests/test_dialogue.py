@@ -13,7 +13,7 @@ def test_reservation_complete_en_un_message(envoyer, django):
     assert "confirmé" in rep["reponse"]
     envoye = json.loads(django.appels_post("/reservations/")[0])
     assert envoye == {"laboratoire": 10, "equipements": [3], "date": DEMAIN,
-                      "heure_debut": "14:00", "heure_fin": "16:00", "motif": "Réservation via l'assistant UMRED"}
+                      "heure_debut": "14:00", "heure_fin": "16:00", "motif": "Réservation via l'assistant SenLab"}
 
 
 def test_reservation_en_attente_de_validation(envoyer, django):
