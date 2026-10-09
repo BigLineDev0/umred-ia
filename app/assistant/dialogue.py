@@ -67,7 +67,7 @@ GESTIONNAIRES_INTENTION: dict[Intention, Gestionnaire] = {
 }
 
 # Valeur d'un bouton cliquable (« equip_3 », « alt_0 »...).
-_VALEUR_BOUTON = re.compile(r"^(equip|dispo|alt|equiv|annul|creneau)_\d+$")
+_VALEUR_BOUTON = re.compile(r"^(equip|dispo|alt|equiv|partiel|annul|creneau)_\d+$")
 
 
 async def traiter_message(user: Utilisateur, session: dict, message: str) -> ChatResponse:

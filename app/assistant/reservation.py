@@ -30,7 +30,7 @@ from app.core.session_store import Etape, definir_etape, memoriser, terminer_eta
 from app.nlu.intentions import Intention
 from app.schemas.chat import ChatOption, ChatResponse, DetailsConfirmation
 from app.services.disponibilite import (
-    LIBELLES_MOMENTS, calculer_creneaux_libres, decouper_en_creneaux, enveloppe, est_disponible,
+    LIBELLES_MOMENTS, calculer_creneaux_libres, decouper_en_creneaux, enveloppe, est_disponible, est_ferme,
     fenetre_moment, jours_de_la_periode, restreindre,
 )
 from app.services.django_client import (
@@ -296,9 +296,12 @@ async def _proposer_creneaux(ctx: Contexte, brouillon: dict, remarques: list[str
 
     definir_etape(ctx.session, Etape.COLLECTE_RESERVATION, brouillon=brouillon, creneaux=creneaux)
     if not creneaux:
+        # Jour fermé : ce n'est pas un planning complet, le dire tel quel.
+        constat = (f"L'établissement est fermé {formater_date(date_iso)}." if est_ferme(horaires, date_iso)
+                   else f"{nom} n'a plus de créneau libre {quand}.")
         return ChatResponse(type="clarification", intention=Intention.RESERVER,
-                            reponse=" ".join([*remarques, f"{nom} n'a plus de créneau libre {quand}. "
-                                              "Souhaitez-vous une autre date ou un autre moment de la journée ?"]),
+                            reponse=" ".join([*remarques, f"{constat} Souhaitez-vous une autre date"
+                                              f"{'' if est_ferme(horaires, date_iso) else ' ou un autre moment de la journée'} ?"]),
                             data={"equipement": nom, "date": date_iso, "creneaux": []})
 
     # Les créneaux sont dans les boutons : la phrase ne les énumère pas.
@@ -364,7 +367,13 @@ async def traiter_selection_equipement(ctx: Contexte) -> ChatResponse | None:
 # 3. Confirmation puis envoi à Django
 # ---------------------------------------------------------------------------
 
-async def proposer_confirmation(ctx: Contexte, creneau: dict, equipements: list[dict]) -> ChatResponse:
+async def proposer_confirmation(
+    ctx: Contexte, creneau: dict, equipements: list[dict], suite: dict | None = None,
+) -> ChatResponse:
+    """
+    `suite` (réservation partielle) : équipements laissés de côté et leurs
+    créneaux libres, proposés juste après l'enregistrement de celle-ci.
+    """
     # Règle Django : tous les équipements d'une réservation appartiennent
     # au même laboratoire. On le vérifie ici pour donner un message clair.
     laboratoires = {e["laboratoire"] for e in equipements}
@@ -396,7 +405,8 @@ async def proposer_confirmation(ctx: Contexte, creneau: dict, equipements: list[
         raison = (verification.data.get("raison_statut") or "").strip()
         information.append(f"ℹ️ Demande soumise à validation{' : ' + raison[:1].lower() + raison[1:] if raison else '.'}")
 
-    definir_etape(ctx.session, Etape.CONFIRMATION_RESERVATION, reservation=reservation, equipements=equipements)
+    definir_etape(ctx.session, Etape.CONFIRMATION_RESERVATION, reservation=reservation, equipements=equipements,
+                  suite=suite)
     memoriser(ctx.session, equipement=equipements[0] if len(equipements) == 1 else None, date=creneau["date"])
 
     # Croisement avec l'algorithme d'alerte d'usure du tableau de bord
@@ -446,7 +456,7 @@ async def _finaliser_reservation(ctx: Contexte) -> ChatResponse:
     # l'action a réellement eu lieu (identifiant et statut réels).
     reponse = ChatResponse(
         type="reservation",
-        reponse=f"C'est confirmé ! Votre réservation pour {quand} est validée.",
+        reponse=f"Réservation confirmée pour {quand}.",
         data={"id": resultat.data.get("id"), "statut": resultat.data.get("statut"), "date": reservation["date"],
               "heure_debut": reservation["heure_debut"], "heure_fin": reservation["heure_fin"],
               "equipements": [e["nom"] for e in equipements]},
@@ -457,7 +467,26 @@ async def _finaliser_reservation(ctx: Contexte) -> ChatResponse:
     if resultat.data.get("statut") == "EN_ATTENTE":
         reponse.reponse = (f"Votre demande pour {quand} est enregistrée. "
                            "Elle est en attente de validation par un responsable : vous serez notifié de sa décision.")
+    if etape.get("suite"):
+        _enchainer_sur_restants(ctx, reservation, etape["suite"], reponse)
     return reponse
+
+
+def _enchainer_sur_restants(ctx: Contexte, reservation: dict, suite: dict, reponse: ChatResponse) -> None:
+    """
+    Réservation partielle enregistrée : on propose aussitôt les créneaux
+    libres des équipements laissés de côté (calculés par Django), dans la
+    même bulle. Ignorer la proposition suffit à la refuser.
+    """
+    restants, creneaux = suite["equipements"], suite["creneaux"]
+    noms = formater_liste([e["nom"] for e in restants])
+    if not creneaux:
+        reponse.reponse += f"\n\nAucun créneau libre n'a été trouvé pour {noms} dans les prochains jours."
+        return
+    definir_etape(ctx.session, Etape.SELECTION_ALTERNATIVE, reservation={**reservation, "equipements": [e["id"] for e in restants]},
+                  equipements=restants, alternatives=creneaux, equivalents=[])
+    reponse.reponse += f"\n\nIl reste {noms} à réserver. Créneaux libres :"
+    reponse.options = _options_creneaux(creneaux)
 
 
 # ---------------------------------------------------------------------------
@@ -467,39 +496,60 @@ async def _finaliser_reservation(ctx: Contexte) -> ChatResponse:
 def _phrase_conflit(reservation: dict, conflits: list[dict]) -> str:
     """« Thermocycleur PCR est déjà réservé demain (vendredi 9 octobre), de 9h à 11h. »"""
     jour = formater_date(reservation["date"])
-    if len(conflits) == 1:
-        c = conflits[0]
-        return f"{c['equipement']} est déjà réservé {jour}, {formater_plage(c['heure_debut'], c['heure_fin'])}."
-    occupes = formater_liste(sorted({c["equipement"] for c in conflits}))
+    # Un même équipement peut avoir plusieurs réservations sur la plage demandée.
+    plages: dict[str, set[tuple[str, str]]] = {}
+    for c in conflits:
+        plages.setdefault(c["equipement"], set()).add((c["heure_debut"][:5], c["heure_fin"][:5]))
+    if len(plages) == 1:
+        nom, occupations = next(iter(plages.items()))
+        return f"{nom} est déjà réservé {jour}, {formater_liste([formater_plage(d, f) for d, f in sorted(occupations)])}."
     plage = formater_plage(reservation["heure_debut"], reservation["heure_fin"])
-    return f"Ce créneau est déjà pris {jour}, {plage}" + (f" : {occupes} sont occupés." if conflits else ".")
+    if not plages:
+        return f"Ce créneau est déjà pris {jour}, {plage}."
+    return f"Ce créneau est déjà pris {jour}, {plage} : {formater_liste(sorted(plages))} sont occupés."
+
+
+def _options_creneaux(creneaux: list[dict]) -> list[ChatOption]:
+    # Créneau en titre, jour en sous-titre : le texte ne les répète pas.
+    return [ChatOption(label=formater_creneau(c["heure_debut"], c["heure_fin"]), value=f"alt_{i}",
+                       description=formater_date_titre(c["date"]))
+            for i, c in enumerate(creneaux)]
 
 
 def proposer_alternatives(
     ctx: Contexte, reservation: dict, equipements: list[dict], conflit: dict, introduction: str | None = None,
 ) -> ChatResponse:
+    """
+    Options proposées, de la moins à la plus contraignante pour l'utilisateur :
+    1. un équipement équivalent libre : même créneau, même type de matériel ;
+    2. un autre créneau où TOUS les équipements demandés sont libres
+       ensemble (une réservation regroupe du matériel utilisé ensemble) ;
+    3. conflit partiel : réserver tout de suite les équipements libres et
+       placer les autres à part. Jamais fait d'office : c'est l'utilisateur
+       qui sait si son matériel doit être utilisé en même temps.
+    """
     alternatives = conflit.get("alternatives") or {}
-    # Créneaux libres pour TOUS les équipements demandés, classés par
-    # proximité avec l'heure voulue ; chacun porte un message explicatif
-    # (« disponible à partir de 11h00 »).
+    # Classés par proximité avec l'heure voulue (calcul Django).
     memes = alternatives.get("creneaux", [])
     # Chaque équivalent indique l'équipement qu'il remplace ('remplace').
     equivalents = alternatives.get("equipements_equivalents", [])
+    partielle = alternatives.get("reservation_partielle")
 
     phrase = introduction or _phrase_conflit(reservation, conflit.get("conflits", []))
+    plage = formater_creneau(reservation["heure_debut"], reservation["heure_fin"])
 
-    # Les alternatives sont les boutons eux-mêmes (créneau en titre, jour
-    # ou équipement remplacé en sous-titre) : le texte ne les répète pas.
     options = [
-        ChatOption(label=formater_creneau(alt["heure_debut"], alt["heure_fin"]), value=f"alt_{i}",
-                   description=formater_date_titre(alt["date"]))
-        for i, alt in enumerate(memes)
-    ] + [
         ChatOption(label=equiv["nom"], value=f"equiv_{equiv['id']}",
-                   description=(f"À la place de {equiv['remplace_nom']}, même créneau"
-                                if equiv.get("remplace_nom") else "Même créneau"))
+                   description=(f"À la place de {equiv['remplace_nom']}, {plage}"
+                                if equiv.get("remplace_nom") else f"Même créneau, {plage}"))
         for equiv in equivalents
-    ]
+    ] + _options_creneaux(memes)
+    if partielle:
+        libres = formater_liste([e["nom"] for e in partielle["libres"]])
+        occupes = formater_liste([e["nom"] for e in partielle["occupes"]])
+        phrase += f" {libres} {'est libre' if len(partielle['libres']) == 1 else 'sont libres'} sur ce créneau."
+        options.append(ChatOption(label=f"Réserver seulement {libres}", value="partiel_0",
+                                  description=f"{plage}, puis un autre créneau pour {occupes}"))
 
     if not options:
         terminer_etape(ctx.session)
@@ -508,10 +558,10 @@ def proposer_alternatives(
                                     "contactez un technicien.")
 
     definir_etape(ctx.session, Etape.SELECTION_ALTERNATIVE, reservation=reservation, equipements=equipements,
-                  alternatives=memes, equivalents=equivalents)
+                  alternatives=memes, equivalents=equivalents, partielle=partielle)
     # Les alternatives sont celles calculées par Django : l'assistant se
     # contente de les présenter.
-    return ChatResponse(type="availability", reponse=f"{phrase} Voici d'autres possibilités :", options=options,
+    return ChatResponse(type="availability", reponse=f"{phrase} Que préférez-vous ?", options=options,
                         data={"disponible": False, "alternatives": memes})
 
 
@@ -536,6 +586,14 @@ async def traiter_selection_alternative(ctx: Contexte) -> ChatResponse | None:
         remplace = equiv.get("remplace", equipements[0]["id"])
         nouveaux = [remplacant if e["id"] == remplace else e for e in equipements]
         return await proposer_confirmation(ctx, creneau, nouveaux)
+
+    partielle = etape.get("partielle")
+    if partielle and lire_choix(ctx.message_normalise, "partiel") == 0:
+        ids_libres = {e["id"] for e in partielle["libres"]}
+        libres = [e for e in equipements if e["id"] in ids_libres]
+        restants = [e for e in equipements if e["id"] not in ids_libres]
+        return await proposer_confirmation(ctx, creneau, libres,
+                                           suite={"equipements": restants, "creneaux": partielle["creneaux_occupes"]})
     return None
 
 

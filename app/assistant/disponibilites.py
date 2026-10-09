@@ -7,10 +7,9 @@ Questions de disponibilité. Deux cas :
   plages libres calculées à partir des réservations renvoyées par Django.
 """
 import asyncio
-from datetime import date
 
 from app.assistant.contexte import Contexte, lire_choix
-from app.assistant.formatage import formater_date, formater_heure, formater_plage
+from app.assistant.formatage import accorder, formater_date, formater_heure, formater_plage
 from app.assistant.reservation import (
     MOTIF_PAR_DEFAUT, horaires_etablissement, proposer_alternatives, reserver_equipement_choisi,
 )
@@ -19,7 +18,7 @@ from app.core.constantes import STATUTS_EQUIPEMENT_NON_RESERVABLES
 from app.core.session_store import Etape, definir_etape, memoriser
 from app.schemas.chat import ChatOption, ChatResponse
 from app.services.disponibilite import (
-    LIBELLES_MOMENTS, calculer_creneaux_libres, enveloppe, fenetre_moment, jours_de_la_periode, restreindre,
+    LIBELLES_MOMENTS, calculer_creneaux_libres, enveloppe, est_ferme, fenetre_moment, jours_de_la_periode, restreindre,
 )
 from app.services.django_client import get_creneaux_occupes, get_equipements, verifier_reservation
 from app.services.matching import resoudre_equipement
@@ -32,15 +31,9 @@ def _formater_creneaux(creneaux: list[tuple[str, str]]) -> str:
     return ", ".join(f"{formater_heure(d)}–{formater_heure(f)}" for d, f in creneaux) or "aucun créneau libre"
 
 
-def _est_ferme(horaires: dict, jour_iso: str) -> bool:
-    """Le jour est-il un jour de fermeture de l'établissement ?"""
-    par_jour = horaires.get("horaires_jour") or {}
-    return bool(par_jour.get(date.fromisoformat(jour_iso).weekday(), (False,))[0])
-
-
 def _libelle_jour(horaires: dict, jour_iso: str, creneaux: list[tuple[str, str]]) -> str:
     # « fermé » plutôt que « aucun créneau libre » : ce n'est pas un planning plein.
-    return "fermé" if _est_ferme(horaires, jour_iso) else _formater_creneaux(creneaux)
+    return "fermé" if est_ferme(horaires, jour_iso) else _formater_creneaux(creneaux)
 
 
 async def consulter_disponibilite(ctx: Contexte) -> ChatResponse:
@@ -120,7 +113,7 @@ async def _disponibilites_equipement(ctx: Contexte, equipement: dict) -> ChatRes
         introduction = (f"Oui, {equipement['nom']} ({equipement['laboratoire_nom']}) est libre {formater_date(jours[0])}{moment} :"
                         if libres[jours[0]] else
                         f"L'établissement est fermé {formater_date(jours[0])} : aucune réservation possible."
-                        if _est_ferme(horaires, jours[0]) else
+                        if est_ferme(horaires, jours[0]) else
                         f"Non, {equipement['nom']} ({equipement['laboratoire_nom']}) n'a aucun créneau libre {formater_date(jours[0])}{moment}.")
         lignes = [f"- {_formater_creneaux(libres[jours[0]])}"] if libres[jours[0]] else []
     else:
@@ -149,7 +142,7 @@ async def _lister_equipements_disponibles(ctx: Contexte, equipements: list[dict]
         tous_les_creneaux = [restreindre(c, fenetre) for c in tous_les_creneaux]
     disponibles = [(e, c) for e, c in zip(reservables, tous_les_creneaux) if c]
     if not disponibles:
-        if _est_ferme(horaires, date_iso):
+        if est_ferme(horaires, date_iso):
             return ChatResponse(reponse=f"L'établissement est fermé {formater_date(date_iso)} : aucune réservation possible.")
         return ChatResponse(reponse=f"Aucun équipement n'a de créneau libre {formater_date(date_iso)}.")
 
@@ -158,7 +151,7 @@ async def _lister_equipements_disponibles(ctx: Contexte, equipements: list[dict]
     # créneaux libres en sous-titre), inutile de les lister aussi ici.
     reponse = f"Équipements disponibles {formater_date(date_iso)}. Choisissez-en un pour le réserver."
     if len(disponibles) > len(affiches):
-        reponse += f" ({len(disponibles) - len(affiches)} autre(s) non affiché(s) : précisez un équipement pour affiner.)"
+        reponse += f" ({accorder(len(disponibles) - len(affiches), 'autre non affiché', 'autres non affichés')} : précisez un équipement pour affiner.)"
 
     # On mémorise la date et la liste proposée côté serveur : le bouton ne
     # transporte que l'id, qui est vérifié à la réception (pas de date ni

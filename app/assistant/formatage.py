@@ -51,6 +51,11 @@ def formater_plage(debut: str, fin: str) -> str:
     return f"de {formater_heure(debut)} à {formater_heure(fin)}"
 
 
+def accorder(nombre: int, singulier: str, pluriel: str | None = None) -> str:
+    """accorder(2, "réservation") -> « 2 réservations » ; 0 et 1 restent au singulier."""
+    return f"{nombre} {singulier if nombre <= 1 else pluriel or singulier + 's'}"
+
+
 def formater_liste(elements: list[str], conjonction: str = "et") -> str:
     """["a", "b", "c"] -> « a, b et c » (ou « a, b ou c » pour un choix)."""
     if len(elements) <= 1:

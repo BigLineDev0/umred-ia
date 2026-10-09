@@ -56,6 +56,7 @@ class FauxDjango:
              "equipements": [1], "equipements_noms": ["Microscope optique Zeiss"]},
         ]
         self.creneaux_occupes: list[dict] = []
+        self.organisation = {"heure_ouverture": "08:00:00", "heure_fermeture": "19:00:00", "horaires": []}
         self.reponse_creation = (201, {"id": 200, "statut": "VALIDEE"})
         self.reponse_verification = (200, {"disponible": True, "conflits": [], "statut_prevu": "VALIDEE", "raison_statut": ""})
         self.reponse_annulation = (200, {"statut": "ANNULEE"})
@@ -96,7 +97,7 @@ class FauxDjango:
             code, corps = self.reponse_annulation
             return httpx.Response(code, json=corps)
         if methode == "GET" and chemin == "/organisations/courante/":
-            return httpx.Response(200, json={"heure_ouverture": "08:00:00", "heure_fermeture": "19:00:00"})
+            return httpx.Response(200, json=self.organisation)
         if methode == "GET" and chemin == "/maintenances/":
             return httpx.Response(200, json=[])
         return httpx.Response(404, json={"detail": "Non trouvé."})

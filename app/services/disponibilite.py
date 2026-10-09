@@ -64,6 +64,12 @@ def calculer_creneaux_libres(
     return resultat
 
 
+def est_ferme(horaires: dict, jour_iso: str) -> bool:
+    """Le jour est-il fermé ? `horaires` : dict renvoyé par horaires_etablissement()."""
+    par_jour = horaires.get("horaires_jour") or {}
+    return bool(par_jour.get(date.fromisoformat(jour_iso).weekday(), (False,))[0])
+
+
 def chevauche(occupes: list[dict], heure_debut: str, heure_fin: str) -> bool:
     """
     Deux intervalles [a, b[ et [c, d[ se chevauchent si a < d ET c < b.

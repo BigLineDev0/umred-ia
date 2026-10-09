@@ -17,7 +17,7 @@ from app.nlu.regles import extraire_par_regles
 from app.nlu.texte import normaliser_texte
 from app.schemas.chat import ChatAction
 from app.services.disponibilite import decouper_en_creneaux, fenetre_moment, jours_de_la_periode, restreindre
-from tests.conftest import AUJOURD_HUI, DEMAIN
+from tests.conftest import AUJOURD_HUI, DANS_3_JOURS, DEMAIN
 
 ROUTES_ANGULAR = {  # routes réellement déclarées dans le frontend (app.routes.ts, Features/*/*.routes.ts)
     "/equipements", "/equipements/ajouter", "/laboratoires", "/laboratoires/ajouter", "/consommables",
@@ -154,6 +154,81 @@ def test_conflit_detecte_avant_confirmation_avec_alternatives_django(envoyer, dj
     rep = envoyer("alt_0")
     assert rep["details_confirmation"]["heure_debut"] == "11:00"
 
+
+
+def _conflit_partiel(django):
+    """PCR (5) pris de 9h à 11h, centrifugeuse (3) libre : conflit partiel."""
+    django.reponse_verification = (200, {
+        "disponible": False,
+        "conflits": [{"equipement_id": 5, "equipement": "Thermocycleur PCR", "heure_debut": "09:00", "heure_fin": "11:00"}],
+        "alternatives": {
+            "creneaux": [{"date": DEMAIN, "heure_debut": "11:00", "heure_fin": "13:00", "type": "plus_tard", "message": ""}],
+            "equipements_equivalents": [],
+            "reservation_partielle": {
+                "libres": [{"id": 3, "nom": "Centrifugeuse Eppendorf"}],
+                "occupes": [{"id": 5, "nom": "Thermocycleur PCR"}],
+                "creneaux_occupes": [{"date": DANS_3_JOURS, "heure_debut": "09:00", "heure_fin": "11:00",
+                                      "type": "autre_jour", "message": ""}],
+            },
+        },
+    })
+
+
+def test_conflit_partiel_propose_de_reserver_l_equipement_libre(envoyer, django):
+    _conflit_partiel(django)
+    rep = envoyer("Réserve le PCR et la centrifugeuse demain de 14h à 16h")
+    assert "Thermocycleur PCR est déjà réservé" in rep["reponse"]
+    assert "Centrifugeuse Eppendorf est libre sur ce créneau" in rep["reponse"]
+    # Créneau commun d'abord (matériel utilisé ensemble), réservation partielle en dernier.
+    assert [o["value"] for o in rep["options"]] == ["alt_0", "partiel_0"]
+    assert rep["options"][-1]["label"] == "Réserver seulement Centrifugeuse Eppendorf"
+
+    django.reponse_verification = (200, {"disponible": True, "conflits": [], "statut_prevu": "VALIDEE"})
+    rep = envoyer("partiel_0")
+    assert rep["details_confirmation"]["equipement"] == "Centrifugeuse Eppendorf"
+
+    rep = envoyer("oui")
+    assert json.loads(django.appels_post("/reservations/")[0])["equipements"] == [3]
+    # Enchaînement : créneaux libres du PCR, calculés par Django.
+    assert "Il reste Thermocycleur PCR à réserver" in rep["reponse"]
+    assert [o["value"] for o in rep["options"]] == ["alt_0"]
+
+    rep = envoyer("alt_0")
+    assert rep["details_confirmation"]["equipement"] == "Thermocycleur PCR"
+    assert rep["details_confirmation"]["heure_debut"] == "09:00"
+
+
+def test_conflit_partiel_ignorer_la_suite(envoyer, django):
+    _conflit_partiel(django)
+    envoyer("Réserve le PCR et la centrifugeuse demain de 14h à 16h")
+    django.reponse_verification = (200, {"disponible": True, "conflits": [], "statut_prevu": "VALIDEE"})
+    envoyer("partiel_0")
+    envoyer("oui")
+    rep = envoyer("Montre-moi mes réservations.")
+    assert rep["type"] == "reservations"
+    assert len(django.appels_post("/reservations/")) == 1
+
+
+def test_meme_equipement_deux_conflits_au_singulier(envoyer, django):
+    django.reponse_verification = (200, {
+        "disponible": False,
+        "conflits": [{"equipement_id": 5, "equipement": "Thermocycleur PCR", "heure_debut": "09:00", "heure_fin": "10:00"},
+                     {"equipement_id": 5, "equipement": "Thermocycleur PCR", "heure_debut": "10:30", "heure_fin": "11:00"}],
+        "alternatives": {"creneaux": [], "equipements_equivalents": []},
+    })
+    rep = envoyer("Réserve le PCR demain de 9h à 11h")
+    assert "Thermocycleur PCR est déjà réservé" in rep["reponse"]
+    assert "de 9h à 10h et de 10h30 à 11h" in rep["reponse"]
+    assert "sont occupés" not in rep["reponse"]
+
+
+def test_jour_ferme_annonce_comme_tel(envoyer, django):
+    jour = date.fromisoformat(DEMAIN).weekday()
+    django.organisation["horaires"] = [{"jour": jour, "ferme": True, "heure_ouverture": "08:00:00", "heure_fermeture": "19:00:00"}]
+    rep = envoyer("Je veux réserver le PCR demain.")
+    assert rep["reponse"].startswith("L'établissement est fermé demain")
+    assert "plus de créneau libre" not in rep["reponse"]
+    assert not rep.get("options")
 
 def test_statut_prevu_annonce_avant_confirmation(envoyer, django):
     django.reponse_verification = (200, {"disponible": True, "conflits": [], "statut_prevu": "EN_ATTENTE",

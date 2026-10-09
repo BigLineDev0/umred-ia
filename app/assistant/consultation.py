@@ -4,7 +4,7 @@ from collections import Counter
 from rapidfuzz import fuzz
 
 from app.assistant.contexte import Contexte
-from app.assistant.formatage import formater_date, formater_heure, formater_plage, resume_reservation
+from app.assistant.formatage import accorder, formater_date, formater_heure, formater_plage, resume_reservation
 from app.assistant.navigation import action_page, actions_pages
 from app.core import temps
 from app.core.constantes import (
@@ -29,7 +29,7 @@ MOTS_PORTEE_GLOBALE = ("tous les utilisateurs", "au total", "toute la plateforme
 
 async def saluer(ctx: Contexte) -> ChatResponse:
     prenom = f" {ctx.user.prenom}" if ctx.user.prenom else ""
-    return ChatResponse(reponse=f"Bonjour{prenom} 👋 Comment puis-je vous aider aujourd'hui ?")
+    return ChatResponse(reponse=f"Bonjour{prenom}. Que souhaitez-vous faire ?")
 
 
 async def donner_nom(ctx: Contexte) -> ChatResponse:
@@ -98,7 +98,7 @@ async def lister_mes_reservations(ctx: Contexte) -> ChatResponse:
     affichees = reservations[:NOMBRE_MAX_RESERVATIONS_AFFICHEES]
     lignes = [introduction] + [f"- {resume_reservation(r)}" for r in affichees]
     if len(reservations) > len(affichees):
-        lignes.append(f"… et {len(reservations) - len(affichees)} autre(s), visibles dans « Mes réservations ».")
+        lignes.append(f"… et {accorder(len(reservations) - len(affichees), 'autre visible', 'autres visibles')} dans « Mes réservations ».")
     return ChatResponse(type="reservations", reponse="\n".join(lignes), actions=actions,
                         data=[donnees_reservation(r) for r in affichees])
 
@@ -183,14 +183,14 @@ async def statistiques(ctx: Contexte) -> ChatResponse:
         # Django ne renvoie la liste complète qu'aux administrateurs : pour
         # les autres rôles, le chiffre porte sur ce qui leur est visible.
         portee = "au total" if ctx.user.role == Role.ADMIN else "vous concernant ou en attente de prise en charge"
-        return ChatResponse(type="statistics", reponse=f"{len(maintenances)} intervention(s) de maintenance {portee}.",
+        return ChatResponse(type="statistics", reponse=f"{accorder(len(maintenances), 'intervention')} de maintenance {portee}.",
                             data={"maintenances": len(maintenances)}, actions=actions_pages(ctx.user.role, "maintenances"))
 
     if "equipement" in message:
         equipements = await get_equipements(ctx.token)
         reservables = sum(1 for e in equipements if e.get("statut") not in STATUTS_EQUIPEMENT_NON_RESERVABLES)
-        return ChatResponse(type="statistics", reponse=f"{len(equipements)} équipement(s) référencé(s) sur la plateforme, "
-                                                      f"dont {reservables} actuellement réservable(s).",
+        return ChatResponse(type="statistics", reponse=f"{accorder(len(equipements), 'équipement référencé', 'équipements référencés')} sur la plateforme, "
+                                                      f"dont {reservables} actuellement {'réservable' if reservables <= 1 else 'réservables'}.",
                             data={"equipements": len(equipements), "reservables": reservables},
                             actions=actions_pages(ctx.user.role, "equipements"))
 
@@ -204,9 +204,9 @@ async def statistiques(ctx: Contexte) -> ChatResponse:
     par_statut = Counter(r["statut"] for r in du_mois)
 
     portee = "sur la plateforme" if globale_autorisee else "pour vous"
-    reponse = f"{len(du_mois)} réservation(s) ce mois-ci {portee}"
+    reponse = f"{accorder(len(du_mois), 'réservation')} ce mois-ci {portee}"
     if du_mois:
-        reponse += f" (dont {par_statut.get('VALIDEE', 0)} validée(s) et {par_statut.get('EN_ATTENTE', 0)} en attente)"
+        reponse += f" (dont {accorder(par_statut.get('VALIDEE', 0), 'validée')} et {par_statut.get('EN_ATTENTE', 0)} en attente)"
     reponse += "."
     if demande_globale and not globale_autorisee:
         reponse += " Les statistiques globales sont réservées aux administrateurs."
@@ -219,13 +219,13 @@ async def statistiques(ctx: Contexte) -> ChatResponse:
 # --- Message d'accueil ---
 
 async def message_accueil(user: Utilisateur) -> ChatResponse:
-    bonjour = f"Bonjour {user.prenom} 👋" if user.prenom else "Bonjour 👋"
+    bonjour = f"Bonjour {user.prenom}." if user.prenom else "Bonjour."
     apercu = apercu_du_jour(await get_reservations(user.token, a_venir=True))
     total, prochaine = apercu["total_du_jour"], apercu["prochaine"]
 
     if total == 0:
         return ChatResponse(reponse=f"{bonjour} Vous n'avez aucune réservation prévue aujourd'hui. Comment puis-je vous aider ?")
-    texte = f"{bonjour} Vous avez {total} réservation(s) aujourd'hui"
+    texte = f"{bonjour} Vous avez {accorder(total, 'réservation')} aujourd'hui"
     if prochaine:
         quoi = (prochaine.get("equipements_noms") or ["salle"])[0]
         texte += f", la prochaine à {formater_heure(prochaine['heure_debut'])} ({quoi}, {prochaine['laboratoire_nom']})"
