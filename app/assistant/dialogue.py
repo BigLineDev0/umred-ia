@@ -36,7 +36,7 @@ import re
 from collections.abc import Awaitable, Callable
 from datetime import date, timedelta
 
-from app.assistant import aide, annulation, consultation, disponibilites, navigation, reservation, suivi
+from app.assistant import aide, annulation, consultation, disponibilites, navigation, reservation, securite, suivi
 from app.assistant.contexte import Contexte, est_non, est_oui, est_relance
 from app.assistant.formatage import formater_date
 from app.core import metriques
@@ -76,6 +76,10 @@ GESTIONNAIRES_INTENTION: dict[Intention, Gestionnaire] = {
     Intention.CONSEIL_EQUIPEMENT: aide.conseiller_equipement,
     Intention.AIDE: aide.repondre_aide,
     Intention.REMERCIEMENT: consultation.remercier,
+    Intention.SECURITE: securite.refuser,
+    Intention.ETAT_ENREGISTREMENT: suivi.etat_enregistrement,
+    Intention.FILE_VALIDATION: suivi.file_validation,
+    Intention.RAISON_INDISPONIBILITE: consultation.expliquer_indisponibilite,
     Intention.MON_NOM: consultation.donner_nom,
     Intention.IDENTITE: consultation.presenter_assistant,
     Intention.SALUTATION: consultation.saluer,
@@ -92,7 +96,10 @@ _VALEUR_BOUTON = re.compile(r"^(equip|dispo|alt|equiv|partiel|annul|creneau)_\d+
 INTENTIONS_REPRISES = {Intention.CONSULTER_DISPONIBILITE, Intention.RESERVER, Intention.CONSULTER_MES_RESERVATIONS,
                        Intention.MAINTENANCE}
 # Intentions qui ne changent pas le sujet de la conversation.
-INTENTIONS_NEUTRES = {Intention.AUTRE, Intention.SALUTATION, Intention.REMERCIEMENT, Intention.IDENTITE, Intention.MON_NOM}
+# Une question d'aide (« explique-moi la maintenance ») ou un refus ne fait
+# pas oublier l'équipement et la question dont on parlait.
+INTENTIONS_NEUTRES = {Intention.AUTRE, Intention.SALUTATION, Intention.REMERCIEMENT, Intention.IDENTITE, Intention.MON_NOM,
+                      Intention.AIDE, Intention.SECURITE}
 _DECALAGES_RELATIFS = {"surlendemain": 2, "lendemain": 1, "veille": -1}
 
 
@@ -139,6 +146,7 @@ async def traiter_message(user: Utilisateur, session: dict, message: str) -> Cha
         reservation_en_cours=etape == Etape.COLLECTE_RESERVATION,
         reprise_possible=ctx.relance and memoire.get("intention") in INTENTIONS_REPRISES,
         pertinent=lambda: _peut_concerner_la_plateforme(ctx),
+        equipement_cite=lambda: _cite_un_equipement(ctx),
     )
     _resoudre_le_contexte(ctx)
     metriques.noter(intention=str(ctx.extraction.intention))
@@ -166,8 +174,12 @@ def _resoudre_le_contexte(ctx: Contexte) -> None:
     if not ctx.relance:
         return
     decalage = next((d for mot, d in _DECALAGES_RELATIFS.items() if mot in ctx.message_normalise), None)
-    if decalage is not None and not ext.date and memoire.get("date"):
-        ext.date = (date.fromisoformat(memoire["date"]) + timedelta(days=decalage)).isoformat()
+    # Référence de « le lendemain » : la date de la réservation en cours de
+    # préparation s'il y en a une, sinon la dernière date consultée.
+    brouillon = ctx.session["contexte"].get("brouillon") if ctx.session["etape"] == Etape.COLLECTE_RESERVATION else None
+    reference = (brouillon or {}).get("date") or memoire.get("date")
+    if decalage is not None and not ext.date and reference:
+        ext.date = (date.fromisoformat(reference) + timedelta(days=decalage)).isoformat()
     a_une_date = ext.date or ext.moment or ext.heure_debut or ext.periode != "jour"
     if ext.intention == Intention.AUTRE and a_une_date and memoire.get("intention") in INTENTIONS_REPRISES:
         ext.intention = memoire["intention"]
@@ -186,9 +198,19 @@ async def _peut_concerner_la_plateforme(ctx: Contexte) -> bool:
     return bool(equipements_mentionnes(ctx.message, await get_equipements(ctx.token)))
 
 
+async def _cite_un_equipement(ctx: Contexte) -> bool:
+    return bool(equipements_mentionnes(ctx.message, await get_equipements(ctx.token)))
+
+
 def _signaler_ambiguite(ctx: Contexte, reponse: ChatResponse) -> ChatResponse:
-    """« Vendredi prochain » dit un jeudi : on dit quelle date a été retenue, et l'autre lecture possible."""
+    """
+    « Vendredi prochain » dit un jeudi : on dit quelle date a été retenue, et
+    l'autre lecture possible. « Le 31 février » : on dit que la date n'existe
+    pas, au lieu de l'ignorer en silence.
+    """
     ext = ctx.extraction
+    if ext and ext.date_invalide:
+        reponse.reponse = f"Le {ext.date_invalide} n'existe pas : indiquez une date valide. {reponse.reponse}"
     if ext and ext.date and ext.date_alternative and reponse.type not in ("error", "denied"):
         reponse.reponse += (f"\n\nJ'ai compris {formater_date(ext.date)}. Si vous pensiez au "
                             f"{formater_date(ext.date_alternative)}, précisez-le.")

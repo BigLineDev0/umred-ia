@@ -12,7 +12,7 @@ import re
 from app.core import temps
 from app.nlu.extraction import Extraction
 from app.nlu.fautes import corriger_dates
-from app.nlu.intentions import intention_par_mots_cles
+from app.nlu.intentions import _VERBE_RESERVER, Intention, intention_par_mots_cles
 from app.nlu.normalisation import ajouter_minutes, date_alternative, normaliser_date
 from app.nlu.texte import normaliser_texte
 
@@ -20,6 +20,10 @@ _NOMBRES_EN_LETTRES = {"une": 1, "un": 1, "deux": 2, "trois": 3, "quatre": 4, "c
 
 # « pendant 2h », « pendant deux heures », « pendant 1h30 »
 _DUREE = re.compile(r"pendant\s+(\d{1,2}|une|un|deux|trois|quatre|cinq|six)\s*(?:h|heures?)\s*(\d{2})?")
+# « pour deux heures », « durant 2 heures » : le mot « heure(s) » est exigé
+# et le nombre borné, sinon « pour 14h » (une heure de début) serait lu
+# comme une durée de 14 heures.
+_DUREE_POUR = re.compile(r"(?:pour|durant)\s+(une|un|deux|trois|quatre|cinq|six|[1-8])\s*heures?\b")
 # « de 10h à 12h », « de 10 à 12h », « entre 9h30 et 11h », « 10h-12h ».
 # Sans « de/entre », la 1re heure doit porter un « h » : sinon « le 12 à
 # 14h » (une date puis une heure) serait lu comme une plage 12h-14h.
@@ -56,7 +60,8 @@ def _heure(heures: str, minutes: str | None) -> str:
 def _extraire_duree_minutes(texte: str) -> int | None:
     correspondance = _DUREE.search(texte)
     if not correspondance:
-        return None
+        pour = _DUREE_POUR.search(texte)
+        return (_NOMBRES_EN_LETTRES.get(pour.group(1)) or int(pour.group(1))) * 60 if pour else None
     quantite, minutes = correspondance.groups()
     heures = _NOMBRES_EN_LETTRES.get(quantite) or int(quantite)
     return heures * 60 + int(minutes or 0)
@@ -180,15 +185,27 @@ def extraire_par_regles(message: str) -> Extraction:
     message_normalise = normaliser_texte(message)
     heure_debut, heure_fin = extraire_heures(message)
     expression = _expression_date(message)
+    date = extraire_date(message)
+    intention = intention_par_mots_cles(message_normalise)
+    if intention == Intention.AUTRE and "reservation" in message_normalise and (date or heure_debut):
+        # « Réservation du microscope demain à 10h » : le nom seul, mais
+        # avec un créneau, vaut une demande de réservation.
+        intention = Intention.RESERVER
+    elif intention == Intention.AIDE and _VERBE_RESERVER.search(message_normalise) and (date or heure_debut):
+        # « Je veux réserver le spectrophotomètre demain de 9h à 11h. Quelles
+        # sont les étapes ? » : la demande concrète passe avant l'explication.
+        intention = Intention.RESERVER
     return Extraction(
-        intention=intention_par_mots_cles(message_normalise),
+        intention=intention,
         # Seul le nom cité après « réserver » est isolé ; sinon la recherche
         # floue se fera sur le message complet.
         equipement=_graphie_originale(extraire_objet_reservation(message_normalise), message, message_normalise),
-        date=extraire_date(message),
+        date=date,
         heure_debut=heure_debut,
         heure_fin=heure_fin,
         periode=extraire_periode(message_normalise),
         moment=extraire_moment(message_normalise),
         date_alternative=date_alternative(expression) if expression else None,
+        date_invalide=expression if expression and not date else None,
+        duree_minutes=_extraire_duree_minutes(message.lower()),
     )

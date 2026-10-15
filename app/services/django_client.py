@@ -192,6 +192,11 @@ async def get_reservations(
     return await _lire("/reservations/", token, params=params)
 
 
+async def get_file_attente(token: str) -> list[dict]:
+    """Demandes que l'utilisateur peut trancher ; Django répond 403 aux non-validateurs."""
+    return await _lire("/reservations/file_attente/", token)
+
+
 # Seules les réservations acquises occupent un créneau : une demande en
 # attente ne bloque personne (Django départage la file à la validation).
 STATUTS_BLOQUANTS = {"VALIDEE", "TERMINEE"}

@@ -30,6 +30,12 @@ def formater_date(iso: str, aujourd_hui: date | None = None) -> str:
     return texte
 
 
+def formater_date_absolue(iso: str) -> str:
+    """« lundi 12 octobre », sans « aujourd'hui (…) » : pour une période (« du lundi 12 au … »)."""
+    d = date.fromisoformat(str(iso)[:10])
+    return f"{JOURS_SEMAINE[d.weekday()]} {d.day}{'er' if d.day == 1 else ''} {MOIS[d.month - 1]}"
+
+
 def formater_date_titre(iso: str, aujourd_hui: date | None = None) -> str:
     """Même chose que formater_date, avec une majuscule (sous-titre de bouton)."""
     texte = formater_date(iso, aujourd_hui)

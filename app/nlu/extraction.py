@@ -29,6 +29,10 @@ class Extraction:
     # Autre lecture possible de la date (« vendredi prochain » dit un
     # jeudi) : l'assistant la signale au lieu de trancher en silence.
     date_alternative: str | None = None
+    # Date citée mais impossible (« le 31 février ») : signalée, jamais devinée.
+    date_invalide: str | None = None
+    # Durée demandée (« pendant deux heures », « pour 2 heures »), en minutes.
+    duree_minutes: int | None = None
 
     @property
     def a_des_informations_de_reservation(self) -> bool:

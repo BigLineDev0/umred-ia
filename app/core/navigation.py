@@ -99,7 +99,8 @@ PAGES: list[Page] = [
          "Voici les demandes de réservation à traiter.",
          roles=frozenset({Role.ADMIN, Role.TECHNICIEN, Role.CHERCHEUR}),
          objets=("reservations", "demandes"), verbes=("valider", "traiter", "gerer", "gestion", "en attente", "a valider"),
-         exclusions=EXCLUSIONS_PERSONNELLES + ("annul",), alternative="mes_reservations"),
+         # « Combien de réservations sont en attente ? » est une statistique.
+         exclusions=EXCLUSIONS_PERSONNELLES + ("annul", "combien", "nombre"), alternative="mes_reservations"),
     Page("pannes", "Équipements en panne", "/maintenances/pannes",
          "Voici la liste des équipements signalés en panne.",
          roles=GESTION, objets=("en panne", "pannes"), verbes=VERBES_CONSULTATION + ("quels", "lesquels"),

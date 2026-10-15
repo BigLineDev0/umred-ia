@@ -161,6 +161,7 @@ async def extraire(
     reservation_en_cours: bool = False,
     reprise_possible: bool = False,
     pertinent: Callable[[], Awaitable[bool]] | None = None,
+    equipement_cite: Callable[[], Awaitable[bool]] | None = None,
 ) -> Extraction:
     """
     `pertinent` : test (asynchrone, évalué seulement si les règles n'ont pas
@@ -170,6 +171,10 @@ async def extraire(
     """
     regles = extraire_par_regles(message)
     if _regles_suffisent(regles, reservation_en_cours, reprise_possible):
+        return regles
+    if reservation_en_cours and equipement_cite is not None and await equipement_cite():
+        # « la centrifugeuse » en réponse à « quel équipement ? » : la collecte
+        # le reconnaît dans la liste de Django ; le modèle (~11 s) n'apporterait rien.
         return regles
     if pertinent is not None and not await pertinent():
         return regles

@@ -14,13 +14,13 @@ from datetime import date, datetime, timedelta
 from rapidfuzz import fuzz
 
 from app.assistant.contexte import Contexte
-from app.assistant.formatage import accorder, formater_date, formater_liste, formater_plage
+from app.assistant.formatage import accorder, formater_date, formater_date_absolue, formater_liste, formater_plage
 from app.assistant.navigation import actions_pages
 from app.core import temps
-from app.core.constantes import LABELS_STATUT_RESERVATION, ROLES_VUE_GLOBALE, Role
+from app.core.constantes import LABELS_STATUT_RESERVATION, ROLES_SUPERVISEURS, ROLES_VUE_GLOBALE, Role
 from app.nlu.texte import contient_un, normaliser_texte
 from app.schemas.chat import ChatResponse
-from app.services.django_client import get_equipements, get_reservations
+from app.services.django_client import get_equipements, get_file_attente, get_reservations
 from app.services.reservations import reservations_actives_a_venir
 
 logger = logging.getLogger(__name__)
@@ -192,35 +192,191 @@ def _heures(valeur: float) -> str:
     return f"{entier} h" + (f" {minutes:02d}" if minutes else "")
 
 
+# « … en ne comptant que les réservations validées » : statuts retenus et libellé.
+FILTRES_STATUT = [
+    (("validee",), {"VALIDEE", "TERMINEE"}, "validées (y compris celles déjà terminées)"),
+    (("annulee",), {"ANNULEE"}, "annulées"),
+    (("refusee",), {"REFUSEE"}, "refusées"),
+    (("en attente",), {"EN_ATTENTE"}, "en attente"),
+    (("terminee",), {"TERMINEE"}, "terminées"),
+]
+MOTS_RESTRICTION = ("ne comptant que", "uniquement", "seulement", "que les")
+MOTS_REPRISE = ("recommence", "refais", "le meme", "meme resume", "meme bilan")
+MOTS_CLASSEMENT = ("plus utilise", "plus reserve", "plus demande")
+
+
+def _filtre_statut(m: str) -> tuple[set[str] | None, str | None]:
+    if contient_un(m, MOTS_RESTRICTION):
+        for mots, statuts, libelle in FILTRES_STATUT:
+            if contient_un(m, mots):
+                return statuts, libelle
+    return None, None
+
+
+def _intervalle(debut: date, fin: date) -> str:
+    return f"du {formater_date_absolue(debut.isoformat())} au {formater_date_absolue(fin.isoformat())}"
+
+
+def _detail_statuts(chiffres: dict) -> str:
+    return formater_liste([accorder(n, *LIBELLES_BILAN[s]) for s, n in chiffres["par_statut"].items()])
+
+
 async def bilan(ctx: Contexte) -> ChatResponse:
+    m = ctx.message_normalise
+    if contient_un(m, MOTS_CLASSEMENT):
+        return await _classement(ctx)
+    if "compare" in m:
+        return await _comparaison(ctx)
+
     ext = ctx.extraction
-    debut, fin, libelle = periode_du_bilan(ext.periode if ext else "semaine", ctx.message_normalise)
-    globale = contient_un(ctx.message_normalise, MOTS_PORTEE_GLOBALE) and ctx.user.role in ROLES_VUE_GLOBALE
+    memoire = ctx.session["memoire"]
+    precedent = memoire.get("bilan")
+    if precedent and contient_un(m, MOTS_REPRISE) and not contient_un(m, ("semaine", "mois")):
+        # « Recommence le résumé… » : même période que le bilan précédent.
+        debut, fin, libelle = date.fromisoformat(precedent["debut"]), date.fromisoformat(precedent["fin"]), precedent["libelle"]
+    else:
+        debut, fin, libelle = periode_du_bilan(ext.periode if ext else "semaine", m)
+    statuts, libelle_filtre = _filtre_statut(m)
+    globale = contient_un(m, MOTS_PORTEE_GLOBALE) and ctx.user.role in ROLES_VUE_GLOBALE
     reservations = await get_reservations(ctx.token, tous=globale, date_debut=debut.isoformat(),
                                           date_fin=fin.isoformat(), archivees=True)
+    if statuts:
+        reservations = [r for r in reservations if r["statut"] in statuts]
     chiffres = calculer_bilan(reservations)
+    memoire["bilan"] = {"debut": debut.isoformat(), "fin": fin.isoformat(), "libelle": libelle}
     qui = "de la plateforme" if globale else "de vos réservations"
-    intervalle = f"du {formater_date(debut.isoformat())} au {formater_date(fin.isoformat())}"
+    intervalle = _intervalle(debut, fin)
     actions = actions_pages(ctx.user.role, "pilotage", "mes_reservations")
+    donnees = {**chiffres, "periode": {"debut": debut.isoformat(), "fin": fin.isoformat()},
+               "portee": "plateforme" if globale else "personnelle", "filtre": sorted(statuts) if statuts else None}
 
     if not chiffres["coherent"]:
         logger.warning("Bilan incohérent (statuts inattendus) : chiffres non affichés.")
         return ChatResponse(type="error", intention="bilan", actions=actions,
                             reponse="Je n'ai pas pu établir un bilan fiable pour cette période. "
                                     "Consultez la liste de vos réservations.")
+    filtre = f" (en ne comptant que les réservations {libelle_filtre})" if libelle_filtre else ""
     if chiffres["total"] == 0:
-        return ChatResponse(type="statistics", intention="bilan", actions=actions, data=chiffres,
-                            reponse=f"Aucune réservation {libelle} ({intervalle}).")
+        return ChatResponse(type="statistics", intention="bilan", actions=actions, data=donnees,
+                            reponse=f"Aucune réservation {libelle}{filtre} ({intervalle}).")
 
-    details = formater_liste([accorder(n, *LIBELLES_BILAN[s]) for s, n in chiffres["par_statut"].items()])
-    phrases = [f"Bilan {qui} {libelle} ({intervalle}) : {accorder(chiffres['total'], 'réservation')}, dont {details}."]
+    phrases = [f"Bilan {qui} {libelle}{filtre}, {intervalle} : {accorder(chiffres['total'], 'réservation')}, "
+               f"dont {_detail_statuts(chiffres)}."]
     if chiffres["heures_utilisation"]:
         phrases.append(f"Temps d'utilisation réservé (validées et terminées) : {_heures(chiffres['heures_utilisation'])}.")
     if chiffres["equipement_principal"]:
         nom, nombre = chiffres["equipement_principal"]
         phrases.append(f"Équipement le plus réservé : {nom} ({accorder(nombre, 'réservation')}).")
-    if globale is False and contient_un(ctx.message_normalise, MOTS_PORTEE_GLOBALE):
+    phrases.append(f"Période utilisée : {intervalle} ({'semaine du lundi au dimanche' if 'semaine' in libelle else 'mois civil'}), "
+                   "d'après les réservations enregistrées sur la plateforme, archives comprises.")
+    if globale is False and contient_un(m, MOTS_PORTEE_GLOBALE):
         phrases.append("Le bilan de toute la plateforme est réservé aux administrateurs ; voici le vôtre.")
-    return ChatResponse(type="statistics", intention="bilan", reponse=" ".join(phrases), actions=actions,
-                        data={**chiffres, "periode": {"debut": debut.isoformat(), "fin": fin.isoformat()},
-                              "portee": "plateforme" if globale else "personnelle"})
+    return ChatResponse(type="statistics", intention="bilan", reponse=" ".join(phrases), actions=actions, data=donnees)
+
+
+async def _comparaison(ctx: Contexte) -> ChatResponse:
+    """« Compare cette semaine à la semaine dernière » (ou ce mois-ci au mois dernier)."""
+    m = ctx.message_normalise
+    aujourd_hui = temps.aujourd_hui()
+    if "mois" in m:
+        debut = aujourd_hui.replace(day=1)
+        fin = (debut + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        fin_prec = debut - timedelta(days=1)
+        periodes = [("ce mois-ci", debut, fin), ("le mois dernier", fin_prec.replace(day=1), fin_prec)]
+    else:
+        lundi = aujourd_hui - timedelta(days=aujourd_hui.weekday())
+        periodes = [("cette semaine", lundi, lundi + timedelta(days=6)),
+                    ("la semaine dernière", lundi - timedelta(days=7), lundi - timedelta(days=1))]
+    resultats = []
+    for libelle, debut, fin in periodes:
+        chiffres = calculer_bilan(await get_reservations(ctx.token, date_debut=debut.isoformat(), date_fin=fin.isoformat(),
+                                                         archivees=True))
+        resultats.append((libelle, debut, fin, chiffres))
+    lignes = []
+    for libelle, debut, fin, c in resultats:
+        detail = f" ({_detail_statuts(c)})" if c["total"] else ""
+        lignes.append(f"- {libelle[:1].upper()}{libelle[1:]}, {_intervalle(debut, fin)} : {accorder(c['total'], 'réservation')}{detail}")
+    ecart = resultats[0][3]["total"] - resultats[1][3]["total"]
+    conclusion = ("Autant de réservations sur les deux périodes." if ecart == 0 else
+                  f"Soit {accorder(abs(ecart), 'réservation')} de {'plus' if ecart > 0 else 'moins'} {resultats[0][0]}.")
+    return ChatResponse(type="statistics", intention="bilan", reponse="\n".join(["Comparaison de vos réservations :", *lignes, conclusion]),
+                        data={libelle: {"debut": d.isoformat(), "fin": f.isoformat(), **c} for libelle, d, f, c in resultats})
+
+
+async def _classement(ctx: Contexte) -> ChatResponse:
+    """« Quels équipements ai-je le plus utilisés ? » : sur toutes les réservations enregistrées."""
+    reservations = await get_reservations(ctx.token, archivees=True)
+    utilisees = [r for r in reservations if r["statut"] in STATUTS_UTILISATION]
+    if not utilisees:
+        return ChatResponse(type="statistics", intention="bilan", data=[],
+                            reponse="Aucune de vos réservations n'a encore été validée : pas de classement possible.")
+    compte, heures = Counter(), Counter()
+    for r in utilisees:
+        for nom in r.get("equipements_noms") or []:
+            compte[nom] += 1
+            heures[nom] += _duree_heures(r)
+    premier_jour = min(r["date"] for r in utilisees)
+    lignes = [f"- {nom} : {accorder(n, 'réservation')}, {_heures(round(heures[nom], 1))}" for nom, n in compte.most_common(5)]
+    return ChatResponse(
+        type="statistics", intention="bilan",
+        reponse="\n".join([f"Vos équipements les plus utilisés depuis le {formater_date_absolue(premier_jour)} "
+                            "(ensemble de vos réservations validées ou terminées) :", *lignes]),
+        data=[{"equipement": nom, "reservations": n, "heures": round(heures[nom], 1)} for nom, n in compte.most_common(5)])
+
+
+# ---------------------------------------------------------------------------
+# « Ma réservation est-elle vraiment enregistrée ? » / file des validateurs
+# ---------------------------------------------------------------------------
+
+async def etat_enregistrement(ctx: Contexte) -> ChatResponse:
+    """Hors confirmation (celle-ci est traitée par son étape) : la réponse vient de Django."""
+    derniere = ctx.session["memoire"].get("derniere_reservation")
+    actions = actions_pages(ctx.user.role, "mes_reservations")
+    if derniere:
+        du_jour = await get_reservations(ctx.token, date_debut=derniere["date"], date_fin=derniere["date"], archivees=True)
+        trouvee = next((r for r in du_jour if r["id"] == derniere["id"]), None)
+        if trouvee:
+            return ChatResponse(type="reservations", actions=actions, data=[_donnees(trouvee)],
+                                reponse=f"Oui : votre réservation {formater_date(trouvee['date'])} "
+                                        f"{formater_plage(trouvee['heure_debut'], trouvee['heure_fin'])} est bien enregistrée "
+                                        f"sur la plateforme (statut : {LABELS_STATUT_RESERVATION.get(trouvee['statut'], trouvee['statut'])}).")
+        return ChatResponse(type="reservations", actions=actions, data=[],
+                            reponse="Je ne retrouve pas cette réservation sur la plateforme : elle n'est pas enregistrée.")
+    actives = reservations_actives_a_venir(await get_reservations(ctx.token, a_venir=True))
+    reponse = ("Une réservation n'est enregistrée qu'après votre « oui » et l'accord de la plateforme ; une proposition "
+               "en attente de confirmation ne l'est pas. Je n'ai aucune proposition en cours avec vous.")
+    if actives:
+        reponse += " Vos réservations enregistrées à venir : " + "; ".join(resume_court(r) for r in actives[:5]) + "."
+    return ChatResponse(type="reservations", reponse=reponse, actions=actions, data=[_donnees(r) for r in actives[:5]])
+
+
+def resume_court(r: dict) -> str:
+    quoi = ", ".join(r.get("equipements_noms") or []) or r.get("laboratoire_nom", "")
+    return (f"{formater_date(r['date'])} {formater_plage(r['heure_debut'], r['heure_fin'])} · {quoi} "
+            f"({LABELS_STATUT_RESERVATION.get(r['statut'], r['statut'])})")
+
+
+async def file_validation(ctx: Contexte) -> ChatResponse:
+    """
+    Demandes qui attendent une décision. Validateurs : la file de Django
+    (/reservations/file_attente/, déjà filtrée selon leurs droits). Autres
+    rôles : aucun accès à cette file, seulement leurs propres demandes.
+    """
+    role = ctx.user.role
+    if role not in ROLES_SUPERVISEURS:
+        en_attente = reservations_actives_a_venir(await get_reservations(ctx.token, statut="EN_ATTENTE"))
+        reponse = ("Seuls les validateurs (encadrant, technicien ou administrateur) statuent sur les demandes : vous "
+                   "n'avez pas accès à leur file. ")
+        reponse += ("Vos demandes en attente de décision : " + "; ".join(resume_court(r) for r in en_attente) + "."
+                    if en_attente else "Aucune de vos demandes n'est en attente de décision.")
+        return ChatResponse(type="reservations", intention="file_validation", reponse=reponse,
+                            data=[_donnees(r) for r in en_attente], actions=actions_pages(role, "mes_reservations"))
+    file = await get_file_attente(ctx.token)
+    actions = actions_pages(role, "reservations_a_valider")
+    if not file:
+        return ChatResponse(type="reservations", intention="file_validation", data=[], actions=actions,
+                            reponse="Aucune demande n'attend votre décision.")
+    lignes = [f"{accorder(len(file), 'demande attend', 'demandes attendent')} votre décision :"]
+    lignes += [f"- {resume_court(r).rsplit(' (', 1)[0]} · {r.get('demandeur_nom', '')}" for r in file[:NOMBRE_MAX_DEMANDES_AFFICHEES]]
+    return ChatResponse(type="reservations", intention="file_validation", reponse="\n".join(lignes), actions=actions,
+                        data=[_donnees(r) for r in file[:NOMBRE_MAX_DEMANDES_AFFICHEES]])

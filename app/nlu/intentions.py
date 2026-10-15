@@ -25,25 +25,66 @@ class Intention(StrEnum):
     CONSEIL_EQUIPEMENT = "conseil_equipement"
     REMERCIEMENT = "remerciement"
     AIDE = "aide"
+    SECURITE = "securite"
+    ETAT_ENREGISTREMENT = "etat_enregistrement"
+    FILE_VALIDATION = "file_validation"
+    RAISON_INDISPONIBILITE = "raison_indisponibilite"
     MON_NOM = "mon_nom"
     IDENTITE = "identite"
     SALUTATION = "salutation"
     AUTRE = "autre"
 
 
+_VERBE_RESERVER = re.compile(r"\breserv(?!ation|able)")
+
 # Mots-clés SANS accents (le message est normalisé avant comparaison).
 # L'ORDRE COMPTE : la première intention qui correspond gagne. On place
 # donc les formulations les plus spécifiques en premier — sinon « mes
 # réservations » serait capté par « reserv » (réserver) et « annule ma
 # réservation » aussi.
-MOTS_CLES_INTENTIONS: list[tuple[Intention, tuple[str, ...]]] = [
+MOTS_CLES_INTENTIONS: list[tuple[Intention, tuple[str | re.Pattern, ...]]] = [
+    # Demandes que l'assistant doit REFUSER explicitement (app/assistant/securite.py) :
+    # statuer sur une réservation, données d'autrui, contournement des règles,
+    # secrets, faux succès. Elles passent avant toute autre intention.
+    (Intention.SECURITE, ("valide ma", "valide la", "valide sa", "valider ma", "valider la reservation", "approuve ma",
+                          "approuve la", "approuver ma", "approuver la",
+                          "d'un autre utilisateur", "d'autres utilisateurs", "des autres utilisateurs",
+                          "reservations privees", "de tout le monde", "ignore tes", "ignore les regles", "oublie tes",
+                          "oublie les consignes", "toutes les donnees", "acces a toutes", "mode administrateur",
+                          "tu es maintenant", "token", "jwt", "cle secrete", "cle api", "secret_key",
+                          "considere quand meme", "considere la reservation comme", "fais comme si",
+                          # « dis-moi que … » mais pas « dis-moi quelles sont mes réservations »
+                          re.compile(r"\bdis[- ]moi qu(?:e |')"), "pretends que", "affirme que")),
+    # « Ma réservation est-elle vraiment enregistrée ou est-ce une proposition ? »
+    (Intention.ETAT_ENREGISTREMENT, ("reellement enregistre", "vraiment enregistre", "bien enregistre", "est enregistree",
+                                     "est-elle enregistree", "seulement une proposition", "juste une proposition")),
+    # « Quelles réservations attendent une décision ? » (validateurs : file d'attente Django).
+    (Intention.FILE_VALIDATION, ("une decision", "ma decision", "a traiter", "attendent une validation",
+                                 "demandes a valider", "reservations a valider")),
+    # « Pourquoi cet équipement est-il indisponible ? »
+    (Intention.RAISON_INDISPONIBILITE, (re.compile(r"pourquoi.*(?:indisponible|pas disponible|pas reservable|plus reservable)"),)),
+    # Questions d'EXPLICATION : elles citent souvent « réservation » ou
+    # « disponible » mais ne demandent aucune action.
+    (Intention.AIDE, ("quelles sont les etapes", "les etapes", "etapes pour", "procedure", "difference entre",
+                      "que signifie", "ca veut dire", "veut dire", "comment savoir", "existe-t-il un autre creneau",
+                      "autre creneau disponible si", "plusieurs equipements", "deux equipements", "quelle date dois",
+                      "quelle date retenir", "creneau autorise", "est autorise", "notification")),
+    # « Fais-moi le bilan des réservations de la semaine » : un résumé
+    # chiffré, et non une réservation (« reserv » est cherché plus bas).
+    (Intention.BILAN, ("bilan", "recap", "resume de mes", "resume des", "resume de la semaine", "faire le point",
+                       "fais le point", "fais-moi le point", "synthese de mes", "resume-moi", "resume moi",
+                       "mon activite", "combien d'heures", "nombre d'heures", "heures d'utilisation", "compare",
+                       "plus utilise", "plus reserve", "plus demande", "les chiffres", "le resume", "periode utilisee")),
+    # Questions chiffrées (« combien de réservations sont en attente ? ») :
+    # avant le statut d'une demande, qui partage les mots « en attente ».
+    (Intention.STATISTIQUES, ("combien", "statistique", "nombre de")),
     # « Pourquoi ma demande est encore en attente ? » : l'état d'une demande
     # en cours, à ne pas confondre avec un refus (cherché juste après).
     (Intention.STATUT_DEMANDE, ("en attente", "ou en est", "statut de ma", "etat de ma", "pas encore valid",
                                 "toujours pas valid", "pas encore trait", "toujours pas trait", "quand sera valid",
                                 "quand ma demande", "pas encore accept", "toujours pas accept", "acceptee",
                                 "ete validee", "est validee", "elle validee", "est confirmee", "elle confirmee",
-                                "est-elle confirmee", "bien confirmee")),
+                                "est-elle confirmee", "bien confirmee", "approuvee")),
     # « Pourquoi ma réservation a été refusée ? » : une explication, et
     # surtout pas une annulation (« annul » est cherché plus bas).
     (Intention.MOTIF_REFUS, ("refus", "rejet", "pourquoi ma reservation", "pourquoi ma demande", "pourquoi mes reservations")),
@@ -58,16 +99,11 @@ MOTS_CLES_INTENTIONS: list[tuple[Intention, tuple[str, ...]]] = [
     (Intention.ANNULER, ("annule", "annuler", "annulation", "supprime ma reservation", "supprimer ma reservation",
                          "supprime la reservation", "plus besoin de ma", "plus besoin de la reservation",
                          "decommand", "desist")),
-    # « Fais-moi le bilan des réservations de la semaine » : un résumé
-    # chiffré, et non une réservation (« reserv » est cherché plus bas).
-    (Intention.BILAN, ("bilan", "recap", "resume de mes", "resume des", "resume de la semaine", "faire le point",
-                       "fais le point", "fais-moi le point", "synthese de mes", "resume-moi", "resume moi",
-                       "mon activite", "combien d'heures", "nombre d'heures", "heures d'utilisation")),
     (Intention.CONSULTER_MES_RESERVATIONS, ("mes reservations", "mes demandes", "prochaines reservations", "mon planning",
                                             "mes creneaux", "ma prochaine reservation", "ma derniere reservation",
-                                            "de prevu", "mon programme", "mon agenda")),
+                                            "de prevu", "mon programme", "mon agenda", "que j'ai reserv",
+                                            "j'ai reserve", "ai-je reserve")),
     (Intention.CREER_EQUIPEMENT, ("ajoute un equipement", "ajouter un equipement", "creer un equipement", "nouvel equipement")),
-    (Intention.STATISTIQUES, ("combien", "statistique", "nombre de")),
     # Signalement d'une panne : APRÈS les statistiques (« combien
     # d'équipements sont en panne ? » est une question chiffrée).
     (Intention.AIDE, ("casse", "ne marche plus", "marche pas", "ne fonctionne plus", "fonctionne pas", "defectueu",
@@ -81,12 +117,17 @@ MOTS_CLES_INTENTIONS: list[tuple[Intention, tuple[str, ...]]] = [
                                     "adapte a ", "pour faire une analyse", "pour realiser une", "pour analyser")),
     # « Réserve-moi un créneau libre » est une réservation : le verbe
     # d'action passe avant les mots de consultation.
-    (Intention.RESERVER, ("reserv", "je veux prendre", "bloquer le", "bloque le", "veux utiliser", "voudrais utiliser",
+    # Le VERBE réserver (« réserve », « réserver », « réservez »), et non le
+    # nom « réservation » : « quelles sont les étapes d'une réservation ? »
+    # ou « valide ma réservation » ne sont pas des demandes de réservation.
+    (Intention.RESERVER, (_VERBE_RESERVER, "faire une reservation", "nouvelle reservation", "une reservation pour",
+                          "une reservation de", "prepare la reservation", "prepare une reservation", "il me faut",
+                          "je veux le ", "je veux la ", "je voudrais le ", "je voudrais la ", "je veux prendre", "bloquer le", "bloque le", "veux utiliser", "voudrais utiliser",
                           "aimerais utiliser", "souhaite utiliser", "souhaiterais utiliser", "besoin du ",
                           "besoin de la ", "besoin de l'", "me garder", "garde-moi", "mets-moi", "mets moi",
                           "inscris-moi", "inscris moi")),
     # « occupé » mais pas « m'occuper » (le message est complété d'une espace finale).
-    (Intention.CONSULTER_DISPONIBILITE, ("dispo", "libre", "creneaux", "occupe ", "occupee", "occupes ", "est pris",
+    (Intention.CONSULTER_DISPONIBILITE, ("dispo", "libre", "creneaux", "occupe ", "occupee", "occupes ", "est pris", "l'a pris",
                                          "deja pris", "de la place", "etre possible", "est possible",
                                          "peux prendre", "puis-je prendre")),
     (Intention.MAINTENANCE, ("maintenance", "entretien", "revision", "revise", "entretenu")),
@@ -111,7 +152,8 @@ MOTS_DISPONIBILITE = ("dispo", "libre")  # « dispo » couvre disponible / dispo
 INTENTIONS_ACTION = {Intention.RESERVER, Intention.ANNULER, Intention.CREER_EQUIPEMENT}
 # Intentions que les mots-clés reconnaissent sans ambiguïté : elles priment
 # sur une intention plus générale proposée par le modèle.
-INTENTIONS_PRIORITAIRES = {Intention.STATUT_DEMANDE, Intention.BILAN}
+INTENTIONS_PRIORITAIRES = {Intention.STATUT_DEMANDE, Intention.BILAN, Intention.SECURITE, Intention.ETAT_ENREGISTREMENT,
+                           Intention.FILE_VALIDATION, Intention.RAISON_INDISPONIBILITE, Intention.AIDE}
 
 
 # « C'est quoi un thermocycleur ? » est une question générale, mais
@@ -129,6 +171,8 @@ def intention_par_mots_cles(message_normalise: str) -> Intention:
     message_normalise = f"{message_normalise} "
     # Une page de l'application explicitement demandée (« je veux gérer
     # les laboratoires », « ajouter un équipement ») : voir app/core/navigation.py.
+    if correspond(message_normalise, MOTS_CLES_INTENTIONS[0][1]):
+        return Intention.SECURITE  # avant toute page : « valide la réservation de X »
     if page_demandee(message_normalise):
         return Intention.NAVIGUER
     if contient_un(message_normalise, QUESTIONS_DEFINITION) and not contient_un(message_normalise, POSSESSIFS):
@@ -144,9 +188,14 @@ def intention_par_mots_cles(message_normalise: str) -> Intention:
         if intention == Intention.CONSEIL_EQUIPEMENT and question_de_disponibilite:
             # « Quel appareil est libre demain ? » : une disponibilité.
             continue
-        if contient_un(message_normalise, mots_cles):
+        if correspond(message_normalise, mots_cles):
             return intention
     return Intention.AUTRE
+
+
+def correspond(message_normalise: str, mots_cles) -> bool:
+    """Mots-clés (sous-chaînes) ou motifs compilés."""
+    return any(m.search(message_normalise) if isinstance(m, re.Pattern) else m in message_normalise for m in mots_cles)
 
 
 def valider_intention(valeur: object) -> Intention:

@@ -303,9 +303,21 @@ umred-labo-ia/
 
 ## 12. Tests
 
+Trois catégories (détails et résultats : `../docs/ASSISTANT_IA_TESTS.md`) :
+
 ```bash
-pytest            # 220 tests, moins de 3 secondes
-pytest tests/test_nlu.py -v
+# 1. Unitaires et campagne de scénarios, SANS modèle ni Django (quelques secondes)
+venv/bin/python -m pytest -q
+venv/bin/python -m pytest tests/campagne -v          # les 66 scénarios seuls
+
+# 2. Intégration avec les VRAIES API : Django (base SQLite temporaire) + service IA (Uvicorn)
+SENLAB_INTEGRATION=1 venv/bin/python -m pytest tests/integration -v
+
+# 3. Évaluation avec le modèle Qwen réel (~2 min de chargement, ~10 s par appel, ~3,5 Gio)
+SENLAB_QWEN=1 HF_HUB_OFFLINE=1 venv/bin/python -m pytest tests/evaluation_qwen -v -s
+
+# Campagne mesurée (plusieurs passes, performance, comparaison avec une autre version du code)
+HF_HUB_OFFLINE=1 venv/bin/python scripts/campagne_assistant.py resultats.json --mode qwen --passes 3 --performance
 ```
 
 Les tests tournent **sans modèle de langage et sans Django** :

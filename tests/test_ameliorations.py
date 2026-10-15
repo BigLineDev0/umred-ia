@@ -293,6 +293,11 @@ def test_plusieurs_exemplaires_choix_avant_l_horaire(envoyer, django):
     ("Le microscope optique marche pas", Intention.AIDE),
     ("Tu fais quoi exactement ?", Intention.IDENTITE),
     ("Combien d'équipements sont en panne ?", Intention.STATISTIQUES),
+    # Règles de refus à ne pas déclencher à tort (relecture de la campagne).
+    ("Ma demande a-t-elle été approuvée ?", Intention.STATUT_DEMANDE),
+    ("Dis-moi quelles sont mes réservations", Intention.CONSULTER_MES_RESERVATIONS),
+    ("Approuve la demande de Fatou", Intention.SECURITE),
+    ("Dis-moi que ma réservation est validée", Intention.SECURITE),
 ])
 def test_nouvelles_intentions_par_regles(message, intention):
     assert extraire_par_regles(message).intention == intention
@@ -434,9 +439,26 @@ def test_hors_perimetre_sans_appel_au_modele(envoyer, django, modele_espion):
 
 def test_mode_degrade_ne_declare_pas_hors_sujet_une_demande_de_la_plateforme(envoyer, django):
     """Modèle non chargé (cas des tests) : l'assistant avoue ne pas comprendre et propose son aide."""
-    rep = envoyer("Il me faut la centrifugeuse demain matin vers 9h")
+    # Formulation qu'aucune règle ne comprend (« il me faut… » est désormais une réservation).
+    rep = envoyer("Je compte sur la centrifugeuse pour mon protocole demain")
     assert rep["type"] == "clarification" and "pas certain de bien comprendre" in rep["reponse"]
     assert "je ne réponds qu'aux questions" not in rep["reponse"]
+
+
+def test_nom_d_equipement_pendant_la_collecte_sans_modele(envoyer, django, modele_espion):
+    envoyer("Je veux réserver vendredi")
+    rep = envoyer("la centrifugeuse")
+    assert "Centrifugeuse" in rep["reponse"] and modele_espion == []  # mesuré : ~11 s économisées
+
+
+def test_abreviation_et_tournure_familiere_sans_modele(envoyer, django, modele_espion):
+    # Qwen classait cette phrase en motif_refus avec une heure inventée (évaluation du modèle seul).
+    django.equipements.append({"id": 6, "nom": "Spectrophotomètre visible", "laboratoire": 20, "statut": "DISPONIBLE",
+                               "laboratoire_nom": "Labo Chimie"})
+    rep = envoyer("Le spectro, quelqu'un l'a pris demain matin ?")
+    assert rep["type"] == "availability" and modele_espion == []
+    # L'exemplaire réservable est retenu, pas celui en panne.
+    assert rep["data"]["equipement"] == "Spectrophotomètre visible"
 
 
 def test_message_lie_a_un_equipement_consulte_le_modele(envoyer, django, modele_espion):

@@ -12,6 +12,7 @@ import re
 
 from rapidfuzz import fuzz
 
+from app.core.constantes import STATUTS_EQUIPEMENT_NON_RESERVABLES
 from app.nlu.texte import normaliser_texte
 
 SEUIL_NOM_COMPLET = 88  # le nom exact (ou presque) de l'équipement est cité
@@ -40,13 +41,18 @@ def _score(texte_normalise: str, equipement: dict) -> tuple[int, float]:
     """
     nom = normaliser_texte(equipement["nom"])
     score_nom = fuzz.partial_ratio(nom, texte_normalise)
-    if score_nom >= SEUIL_NOM_COMPLET:
+    if score_nom >= SEUIL_NOM_COMPLET and _nom_complet_cite(nom, texte_normalise):
         return 2, score_nom
     fam = famille(nom)
     if len(fam) >= LONGUEUR_MIN_FAMILLE:
         score_famille = fuzz.partial_ratio(fam, texte_normalise)
         if score_famille >= SEUIL_FAMILLE:
             return 1, score_famille
+    # Abréviation du type d'équipement (« le spectro », « la centri ») :
+    # un mot d'au moins 5 lettres qui commence le nom de la famille.
+    if len(fam) >= LONGUEUR_MIN_FAMILLE and any(
+            len(m) >= 5 and fam.startswith(m) and m != fam for m in re.findall(r"[a-z0-9]+", texte_normalise)):
+        return 1, float(SEUIL_FAMILLE)
     # Mot distinctif cité seul (« le PCR » pour « Thermocycleur PCR ») :
     # correspondance EXACTE d'un mot, pour ne pas créer de faux positifs.
     mots_texte = set(re.findall(r"[a-z0-9-]+", texte_normalise))
@@ -54,6 +60,27 @@ def _score(texte_normalise: str, equipement: dict) -> tuple[int, float]:
     if any(mot in mots_texte for mot in mots_nom):
         return 1, float(SEUIL_FAMILLE)
     return 0, 0.0
+
+
+def _nom_complet_cite(nom: str, texte_normalise: str) -> bool:
+    """
+    Le nom est-il vraiment cité, et pas seulement son premier mot ? Tous ses
+    mots, ou au moins deux (« microscope optique » pour « Microscope optique
+    Zeiss »), doivent figurer dans le message, à une faute près. Sans ce
+    contrôle, « le spectrophotomètre » passait pour le nom complet de
+    « Spectrophotomètre UV » (« uv » manquant toléré par partial_ratio), et
+    l'exemplaire en panne était choisi plutôt que celui qui est disponible.
+    """
+    mots_texte = re.findall(r"[a-z0-9-]+", texte_normalise)
+    mots_nom = re.findall(r"[a-z0-9-]+", nom)
+
+    def present(mot: str) -> bool:
+        if len(mot) <= 3:
+            return mot in mots_texte
+        return any(fuzz.ratio(mot, m) >= 85 for m in mots_texte)
+
+    trouves = sum(present(m) for m in mots_nom)
+    return trouves == len(mots_nom) or trouves >= 2
 
 
 def equipements_mentionnes(texte: str, equipements: list[dict]) -> dict[str, list[dict]]:
@@ -84,8 +111,12 @@ def resoudre_equipement(texte: str, equipements: list[dict]) -> dict | None:
     if not texte or not equipements:
         return None
     texte_normalise = normaliser_texte(texte)
-    niveau, score, equipement = max(
-        ((*_score(texte_normalise, e), e) for e in equipements), key=lambda t: (t[0], t[1])
+    # À score égal (« le spectrophotomètre » alors qu'il y en a un en panne
+    # et un disponible), l'exemplaire réservable passe devant : avant, le
+    # premier de la liste était retenu, même en panne.
+    niveau, score, _, equipement = max(
+        ((*_score(texte_normalise, e), e.get("statut") not in STATUTS_EQUIPEMENT_NON_RESERVABLES, e) for e in equipements),
+        key=lambda t: (t[0], t[1], t[2]),
     )
     return equipement if niveau else None
 

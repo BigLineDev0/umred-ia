@@ -7,6 +7,7 @@ Questions de disponibilité. Deux cas :
   plages libres calculées à partir des réservations renvoyées par Django.
 """
 import asyncio
+import re
 
 from app.assistant.contexte import Contexte, lire_choix
 from app.assistant.formatage import accorder, formater_date, formater_heure, formater_plage
@@ -21,8 +22,13 @@ from app.services.disponibilite import (
     LIBELLES_MOMENTS, calculer_creneaux_libres, enveloppe, est_ferme, fenetre_moment, jours_de_la_periode, restreindre,
 )
 from app.services.django_client import get_creneaux_occupes, get_equipements, verifier_reservation
+from app.nlu.texte import contient_un, normaliser_texte
 from app.services.matching import resoudre_equipement, version_actuelle
 
+# « Mon équipement », « cet équipement » : un équipement précis, mais non nommé.
+DESIGNATIONS_D_UN_EQUIPEMENT = ("mon equipement", "cet equipement", "mon appareil", "cet appareil", "cette machine",
+                                "ma machine")
+MOTS_GENERIQUES_LABO = {"labo", "laboratoire", "salle"}
 NOMBRE_MAX_EQUIPEMENTS_AFFICHES = 8  # au-delà, la réponse devient illisible dans une bulle de chat
 APPELS_DJANGO_SIMULTANES = 5          # parallélisme borné pour ne pas saturer Django
 
@@ -50,9 +56,26 @@ async def consulter_disponibilite(ctx: Contexte) -> ChatResponse:
         if ext.date and ext.heure_debut and ext.heure_fin:
             return await _verifier_creneau_precis(ctx, equipement)
         return await _disponibilites_equipement(ctx, equipement)
+    if contient_un(ctx.message_normalise, DESIGNATIONS_D_UN_EQUIPEMENT):
+        # « Mon équipement est-il disponible ? » sans équipement connu : on
+        # demande lequel plutôt que de lister tout le parc.
+        return ChatResponse(type="clarification", intention="consulter_disponibilite",
+                            reponse="Quel équipement voulez-vous que je vérifie, et pour quelle date ? "
+                                    "Par exemple : « le microscope optique est-il libre demain matin ? ».")
     # Aucun équipement précis (« quels équipements sont disponibles ? ») :
     # on liste ceux qui ont au moins un créneau libre à la date demandée.
     return await _lister_equipements_disponibles(ctx, equipements, ext.date or temps.aujourd_hui().isoformat())
+
+
+def laboratoires_cites(message_normalise: str, equipements: list[dict]) -> set[str]:
+    """« dans le laboratoire de biologie » -> {"Labo Biologie"} (noms réels des laboratoires)."""
+    mots_message = set(re.findall(r"[a-z0-9-]+", message_normalise))
+    cites = set()
+    for nom in {e.get("laboratoire_nom") for e in equipements if e.get("laboratoire_nom")}:
+        mots_nom = {m for m in re.findall(r"[a-z0-9-]+", normaliser_texte(nom)) if len(m) >= 4 and m not in MOTS_GENERIQUES_LABO}
+        if mots_nom and mots_nom <= mots_message:
+            cites.add(nom)
+    return cites
 
 
 async def _verifier_creneau_precis(ctx: Contexte, equipement: dict) -> ChatResponse:
@@ -133,6 +156,10 @@ async def _lister_equipements_disponibles(ctx: Contexte, equipements: list[dict]
     # Un équipement en panne, en maintenance ou hors service n'est jamais
     # proposé, quel que soit son planning.
     reservables = [e for e in equipements if e.get("statut") not in STATUTS_EQUIPEMENT_NON_RESERVABLES]
+    # « … dans le laboratoire de biologie » : seulement ce laboratoire.
+    laboratoires = laboratoires_cites(ctx.message_normalise, equipements)
+    if laboratoires:
+        reservables = [e for e in reservables if e.get("laboratoire_nom") in laboratoires]
     limite = asyncio.Semaphore(APPELS_DJANGO_SIMULTANES)
     horaires = await horaires_etablissement(ctx)
 
@@ -154,7 +181,8 @@ async def _lister_equipements_disponibles(ctx: Contexte, equipements: list[dict]
     affiches = disponibles[:NOMBRE_MAX_EQUIPEMENTS_AFFICHES]
     # Une phrase courte : chaque équipement est un bouton (laboratoire et
     # créneaux libres en sous-titre), inutile de les lister aussi ici.
-    reponse = f"Équipements disponibles {formater_date(date_iso)}. Choisissez-en un pour le réserver."
+    ou = f" ({', '.join(sorted(laboratoires))})" if laboratoires else ""
+    reponse = f"Équipements disponibles {formater_date(date_iso)}{ou}. Choisissez-en un pour le réserver."
     if len(disponibles) > len(affiches):
         reponse += f" ({accorder(len(disponibles) - len(affiches), 'autre non affiché', 'autres non affichés')} : précisez un équipement pour affiner.)"
 

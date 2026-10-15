@@ -1,10 +1,13 @@
 """Réponses « en lecture seule » : aucune n'ouvre d'étape de dialogue."""
 from collections import Counter
+from datetime import timedelta
 
 from rapidfuzz import fuzz
 
 from app.assistant.contexte import Contexte
-from app.assistant.formatage import accorder, formater_date, formater_heure, formater_plage, resume_reservation
+from app.assistant.formatage import (
+    MOIS, accorder, formater_date, formater_date_absolue, formater_heure, formater_liste, formater_plage, resume_reservation,
+)
 from app.assistant.navigation import action_page, actions_pages
 from app.assistant.aide import REPONSE_HORS_PERIMETRE
 from app.core import temps
@@ -14,6 +17,7 @@ from app.core.constantes import (
     STATUTS_EQUIPEMENT_NON_RESERVABLES, Role,
 )
 from app.core.security import Utilisateur
+from app.core.session_store import memoriser
 from app.nlu.conversation import MESSAGE_AIDE, REPONSE_REPLI, repondre_conversationnel
 from app.nlu.domaine import concerne_le_labo, peut_concerner_la_plateforme
 from app.nlu.texte import contient_un, normaliser_texte
@@ -160,6 +164,8 @@ async def expliquer_refus(ctx: Contexte) -> ChatResponse:
 async def prochaine_maintenance(ctx: Contexte) -> ChatResponse:
     equipements = await get_equipements(ctx.token)
     equipement = resoudre_equipement(ctx.extraction.equipement or ctx.message, equipements) or version_actuelle(ctx.equipement_du_contexte, equipements)
+    if not equipement and contient_un(ctx.message_normalise, MOTS_LISTE):
+        return await _equipements_en_maintenance(ctx, equipements)
     if not equipement:
         return ChatResponse(type="clarification",
                             reponse="Sur quel équipement souhaitez-vous connaître la prochaine maintenance ? "
@@ -187,10 +193,91 @@ async def prochaine_maintenance(ctx: Contexte) -> ChatResponse:
                                 f"{formater_date(a_venir[0]['date_planifiee'])}.")
 
 
+async def _equipements_en_maintenance(ctx: Contexte, equipements: list[dict]) -> ChatResponse:
+    """« Quels équipements sont en maintenance ? » : statuts réels et maintenances planifiées (Django)."""
+    en_maintenance = [e for e in equipements if e.get("statut") == "EN_MAINTENANCE"]
+    planifiees = sorted((m for m in await get_maintenances(ctx.token, statut=STATUT_MAINTENANCE_PLANIFIEE)
+                         if m["date_planifiee"][:10] >= temps.aujourd_hui().isoformat()), key=lambda m: m["date_planifiee"])
+    noms = {e["id"]: e["nom"] for e in equipements}
+    lignes = [("Équipements actuellement en maintenance (non réservables) : "
+               + ", ".join(f"{e['nom']} ({e.get('laboratoire_nom')})" for e in en_maintenance) + ".")
+              if en_maintenance else "Aucun équipement n'est actuellement en maintenance."]
+    if planifiees:
+        lignes.append("Maintenances planifiées à venir (l'équipement reste réservable, sauf le jour de l'intervention) : "
+                      + ", ".join(f"{noms.get(m['equipement'], m.get('equipement_nom', ''))} {formater_date(m['date_planifiee'])}"
+                                  for m in planifiees[:5]) + ".")
+    return ChatResponse(type="maintenance", reponse=" ".join(lignes), actions=actions_pages(ctx.user.role, "maintenances", "equipements"),
+                        data={"en_maintenance": [e["nom"] for e in en_maintenance],
+                              "planifiees": [m["date_planifiee"] for m in planifiees]})
+
+
+# « Quels équipements sont en maintenance ? » : une liste, pas un équipement précis.
+MOTS_LISTE = ("quels equipements", "lesquels", "liste des", "actuellement en maintenance")
+
+
+# --- Indisponibilité d'un équipement ---
+
+DEMONSTRATIFS = ("cet equipement", "cet appareil", "cette machine", "celui-ci", "celle-ci", " il ", " elle ")
+EXPLICATION_INDISPONIBILITE = (
+    "Un équipement peut être indisponible pour plusieurs raisons :\n"
+    "- il est en panne, en maintenance ou hors service : il n'est alors pas réservable du tout ;\n"
+    "- le créneau demandé est déjà pris par une réservation validée ;\n"
+    "- une maintenance est planifiée ce jour-là (la journée est fermée aux réservations) ;\n"
+    "- l'établissement est fermé ce jour-là ou à cette heure.\n"
+    "Donnez-moi le nom de l'équipement pour que je vérifie sa situation réelle."
+)
+
+
+async def expliquer_indisponibilite(ctx: Contexte) -> ChatResponse:
+    """« Pourquoi cet équipement est-il indisponible ? » : son statut réel et ses maintenances (Django)."""
+    equipements = await get_equipements(ctx.token)
+    equipement = resoudre_equipement(ctx.extraction.equipement or ctx.message, equipements)
+    if equipement is None and contient_un(f" {ctx.message_normalise} ", DEMONSTRATIFS):
+        # « cet équipement » : celui dont on vient de parler.
+        equipement = version_actuelle(ctx.session["memoire"].get("equipement"), equipements)
+    if equipement is None:
+        if contient_un(ctx.message_normalise, ("un equipement", "les equipements", "des equipements")):
+            return ChatResponse(intention="raison_indisponibilite", reponse=EXPLICATION_INDISPONIBILITE)
+        return ChatResponse(type="clarification", intention="raison_indisponibilite",
+                            reponse="De quel équipement parlez-vous ? Donnez-moi son nom (par exemple « le microscope "
+                                    "optique ») et je vérifierai sa situation.")
+    nom, statut = equipement["nom"], equipement.get("statut")
+    if statut == "EN_PANNE":
+        reponse = f"{nom} est signalé en panne : il n'est plus réservable jusqu'à sa remise en service par un technicien."
+    elif statut == "EN_MAINTENANCE":
+        reponse = f"{nom} est en maintenance (intervention en cours) : il n'est pas réservable avant la clôture de l'intervention."
+    elif statut == "HORS_SERVICE":
+        reponse = f"{nom} est hors service (retiré du parc) : il n'est pas réservable."
+    else:
+        reponse = (f"{nom} est réservable. S'il vous a paru indisponible, c'est que le créneau était déjà pris, que "
+                   "l'établissement était fermé ou qu'une maintenance est prévue ce jour-là.")
+    planifiees = [m for m in await get_maintenances(ctx.token, equipement_id=equipement["id"], statut=STATUT_MAINTENANCE_PLANIFIEE)
+                  if m["date_planifiee"][:10] >= temps.aujourd_hui().isoformat()]
+    if planifiees:
+        prochaine = min(planifiees, key=lambda m: m["date_planifiee"])
+        reponse += f" Prochaine maintenance planifiée : {formater_date(prochaine['date_planifiee'])}."
+    memoriser(ctx.session, equipement=equipement)
+    return ChatResponse(intention="raison_indisponibilite", reponse=reponse,
+                        actions=[ChatAction(label=f"Voir {nom}", route=f"/equipements/{int(equipement['id'])}")],
+                        data={"equipement": nom, "statut_equipement": statut})
+
+
 # --- Statistiques ---
+
+# Statut demandé dans une question chiffrée, et statuts Django correspondants.
+CLES_DONNEES = {"en attente": "en_attente", "annulee": "annulees", "refusee": "refusees", "terminee": "terminees"}
+STATUTS_DEMANDES = [("en attente", {"EN_ATTENTE"}, "en attente"),
+                    ("validee", {"VALIDEE", "TERMINEE"}, "validées"),
+                    ("annulee", {"ANNULEE"}, "annulées"),
+                    ("refusee", {"REFUSEE"}, "refusées"),
+                    ("terminee", {"TERMINEE"}, "terminées")]
+
 
 async def statistiques(ctx: Contexte) -> ChatResponse:
     message = ctx.message_normalise
+
+    if "equipement" in message and contient_un(message, ("panne", "maintenance", "hors service")):
+        return await _equipements_par_statut(ctx)
 
     if "maintenance" in message:
         maintenances = await get_maintenances(ctx.token)
@@ -201,18 +288,7 @@ async def statistiques(ctx: Contexte) -> ChatResponse:
                             data={"maintenances": len(maintenances)}, actions=actions_pages(ctx.user.role, "maintenances"))
 
     if "panne" in message or "hors service" in message:
-        # « Combien d'équipements sont en panne ? » : décompte réel par statut.
-        equipements = await get_equipements(ctx.token)
-        en_panne = [e for e in equipements if e.get("statut") == "EN_PANNE"]
-        hors_service = [e for e in equipements if e.get("statut") == "HORS_SERVICE"]
-        reponse = f"{accorder(len(en_panne), 'équipement')} actuellement en panne"
-        if en_panne:
-            reponse += f" : {', '.join(e['nom'] for e in en_panne[:5])}{'…' if len(en_panne) > 5 else ''}"
-        if hors_service:
-            reponse += f" ; {accorder(len(hors_service), 'équipement')} hors service"
-        return ChatResponse(type="statistics", reponse=reponse + ".",
-                            data={"en_panne": len(en_panne), "hors_service": len(hors_service)},
-                            actions=actions_pages(ctx.user.role, "pannes", "equipements"))
+        return await _equipements_par_statut(ctx)
 
     if "equipement" in message:
         equipements = await get_equipements(ctx.token)
@@ -226,6 +302,9 @@ async def statistiques(ctx: Contexte) -> ChatResponse:
     # Django n'ouvre la liste complète (?all=true) qu'aux administrateurs :
     # la demander pour un autre rôle provoquerait un refus 403.
     globale_autorisee = demande_globale and ctx.user.role in ROLES_VUE_GLOBALE
+    statut_demande = next((s for s in STATUTS_DEMANDES if s[0] in message), None)
+    if statut_demande:
+        return await _reservations_par_statut(ctx, statut_demande, globale_autorisee)
     reservations = await get_reservations(ctx.token, tous=globale_autorisee)
     mois_courant = temps.aujourd_hui().strftime("%Y-%m")
     du_mois = [r for r in reservations if r["date"].startswith(mois_courant)]
@@ -242,6 +321,65 @@ async def statistiques(ctx: Contexte) -> ChatResponse:
                         data={"reservations_du_mois": len(du_mois), "validees": par_statut.get("VALIDEE", 0),
                               "en_attente": par_statut.get("EN_ATTENTE", 0), "portee": "plateforme" if globale_autorisee else "personnelle"},
                         actions=actions_pages(ctx.user.role, "rapports", "pilotage"))
+
+
+async def _equipements_par_statut(ctx: Contexte) -> ChatResponse:
+    """« Combien d'équipements sont en panne ou en maintenance ? » : statuts réels des équipements."""
+    equipements = await get_equipements(ctx.token)
+    groupes = [("en panne", "EN_PANNE"), ("en maintenance", "EN_MAINTENANCE"), ("hors service", "HORS_SERVICE")]
+    lignes, donnees = [], {}
+    for libelle, statut in groupes:
+        liste = [e["nom"] for e in equipements if e.get("statut") == statut]
+        donnees[statut.lower()] = len(liste)
+        if liste or statut != "HORS_SERVICE":
+            lignes.append(f"{accorder(len(liste), 'équipement')} {libelle}" + (f" ({', '.join(liste[:5])})" if liste else ""))
+    return ChatResponse(type="statistics", reponse=f"Actuellement : {formater_liste(lignes)}.", data=donnees,
+                        actions=actions_pages(ctx.user.role, "pannes", "equipements"))
+
+
+async def _reservations_par_statut(ctx: Contexte, statut_demande: tuple, globale: bool) -> ChatResponse:
+    """
+    « Combien de réservations sont en attente ? », « … validées ce mois-ci ? ».
+    La période est toujours dite : celle demandée, sinon « à venir » pour les
+    demandes en attente et « au total » pour les autres statuts.
+    « Validées » compte aussi les réservations validées déjà terminées, et le précise.
+    """
+    mot, statuts, libelle = statut_demande
+    message = ctx.message_normalise
+    aujourd_hui = temps.aujourd_hui()
+    if "mois" in message:
+        debut = aujourd_hui.replace(day=1)
+        fin = (debut + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        periode = f"en {MOIS[aujourd_hui.month - 1]} (du 1er au {fin.day} {MOIS[aujourd_hui.month - 1]})"
+        reservations = await get_reservations(ctx.token, tous=globale, date_debut=debut.isoformat(), date_fin=fin.isoformat(),
+                                              archivees=True)
+    elif "semaine" in message:
+        lundi = aujourd_hui - timedelta(days=aujourd_hui.weekday())
+        periode = f"cette semaine (du {formater_date_absolue(lundi.isoformat())} au {formater_date_absolue((lundi + timedelta(days=6)).isoformat())})"
+        reservations = await get_reservations(ctx.token, tous=globale, date_debut=lundi.isoformat(),
+                                              date_fin=(lundi + timedelta(days=6)).isoformat(), archivees=True)
+    elif statuts == {"EN_ATTENTE"}:
+        periode = "à venir"
+        reservations = reservations_actives_a_venir(await get_reservations(ctx.token, tous=globale, a_venir=True))
+    else:
+        periode = "au total (toutes vos réservations enregistrées)"
+        reservations = await get_reservations(ctx.token, tous=globale, archivees=True)
+    retenues = [r for r in reservations if r["statut"] in statuts]
+    qui = "sur la plateforme" if globale else "pour vous"
+    reponse = f"{accorder(len(retenues), 'réservation')} {libelle} {periode} {qui}"
+    donnees = {"portee": "plateforme" if globale else "personnelle", "periode": periode}
+    if statuts == {"VALIDEE", "TERMINEE"}:
+        terminees = sum(r["statut"] == "TERMINEE" for r in retenues)
+        reponse += f" : {len(retenues) - terminees} à venir ou en cours et {accorder(terminees, 'déjà terminée', 'déjà terminées')}"
+        donnees.update(validees=len(retenues), terminees=terminees)
+    else:
+        donnees[CLES_DONNEES[mot]] = len(retenues)
+    if retenues and len(retenues) <= 5:
+        reponse += ". Détail : " + "; ".join(
+            f"{formater_date(r['date'])} {formater_plage(r['heure_debut'], r['heure_fin'])} · "
+            f"{', '.join(r.get('equipements_noms') or []) or r.get('laboratoire_nom', '')}" for r in sorted(retenues, key=lambda r: r["date"]))
+    return ChatResponse(type="statistics", reponse=reponse + ".", data=donnees,
+                        actions=actions_pages(ctx.user.role, "mes_reservations"))
 
 
 # --- Message d'accueil ---
