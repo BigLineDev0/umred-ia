@@ -3,13 +3,17 @@ Unique point de contact avec l'API Django. Toutes les fonctions reçoivent
 le token de l'utilisateur et le retransmettent : Django reste seul juge des
 permissions (FastAPI n'a aucun accès direct à la base de données).
 """
+import copy
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from app.core.config import settings
+from app.core.metriques import chronometrer
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,23 @@ async def fermer_client() -> None:
         _client = None
 
 
+# Cache des LECTURES limité à UNE requête de l'assistant : un même message
+# relisait jusqu'à trois fois la liste des équipements ou les horaires.
+# Aucune donnée n'est conservée d'une requête à l'autre ni partagée entre
+# utilisateurs (pas de risque de disponibilité périmée), et toute écriture
+# (création, annulation) vide le cache.
+_cache_requete: ContextVar[dict | None] = ContextVar("cache_lectures_django", default=None)
+
+
+@contextmanager
+def portee_requete():
+    jeton = _cache_requete.set({})
+    try:
+        yield
+    finally:
+        _cache_requete.reset(jeton)
+
+
 def _extraire_detail(resp: httpx.Response) -> dict[str, Any]:
     """
     DRF renvoie ses erreurs sous plusieurs formes : {"detail": "..."},
@@ -85,9 +106,13 @@ def _extraire_detail(resp: httpx.Response) -> dict[str, Any]:
 
 async def _requete(methode: str, chemin: str, token: str, **kwargs: Any) -> httpx.Response:
     try:
-        return await _get_client().request(
-            methode, chemin, headers={"Authorization": f"Bearer {token}"}, **kwargs
-        )
+        with chronometrer("django"):
+            return await _get_client().request(
+                methode, chemin, headers={"Authorization": f"Bearer {token}"}, **kwargs
+            )
+    except httpx.TimeoutException as exc:
+        logger.error("Django trop lent (%s %s) : %s", methode, chemin, type(exc).__name__)
+        raise DjangoAPIError(504, "Le service principal ne répond pas à temps.") from exc
     except httpx.RequestError as exc:
         # On journalise la cause technique, mais on n'expose jamais l'URL
         # interne de Django à l'utilisateur final.
@@ -96,13 +121,25 @@ async def _requete(methode: str, chemin: str, token: str, **kwargs: Any) -> http
 
 
 async def _lire(chemin: str, token: str, params: dict[str, Any] | None = None) -> Any:
+    cache = _cache_requete.get()
+    cle = (chemin, tuple(sorted((params or {}).items())))
+    if cache is not None and cle in cache:
+        # Copie : un appelant qui modifierait la liste ne doit pas altérer
+        # ce que lira le suivant.
+        return copy.deepcopy(cache[cle])
     resp = await _requete("GET", chemin, token, params=params)
     if not resp.is_success:
         raise DjangoAPIError(resp.status_code, _extraire_detail(resp)["detail"])
-    return resp.json()
+    donnees = resp.json()
+    if cache is not None:
+        cache[cle] = copy.deepcopy(donnees)
+    return donnees
 
 
 async def _agir(chemin: str, token: str, json: dict[str, Any] | None = None) -> ResultatAction:
+    cache = _cache_requete.get()
+    if cache is not None:
+        cache.clear()  # l'écriture peut changer ce qui a été lu
     resp = await _requete("POST", chemin, token, json=json)
     if resp.status_code in (401, 403) or resp.status_code >= 500:
         raise DjangoAPIError(resp.status_code, _extraire_detail(resp)["detail"])
@@ -133,6 +170,7 @@ async def get_alerte_usure(token: str, equipement_id: int) -> dict | None:
 async def get_reservations(
     token: str, *, tous: bool = False, a_venir: bool = False,
     date_debut: str | None = None, date_fin: str | None = None, statut: str | None = None,
+    archivees: bool = False,
 ) -> list[dict]:
     """
     Sans option : uniquement MES réservations (règle appliquée par Django).
@@ -146,6 +184,10 @@ async def get_reservations(
         params["all"] = "true"
     if a_venir:
         params["a_venir"] = "true"
+    if archivees:
+        # Un bilan compte aussi les réservations archivées (refusées,
+        # annulées ou terminées rangées par un administrateur).
+        params["archivees"] = "true"
     params.update({k: v for k, v in {"date_debut": date_debut, "date_fin": date_fin, "statut": statut}.items() if v})
     return await _lire("/reservations/", token, params=params)
 
@@ -178,8 +220,13 @@ async def get_horaires(token: str) -> tuple[str, str, dict[int, tuple[bool, str,
             for h in organisation.get("horaires") or []
         }
         return organisation["heure_ouverture"][:5], organisation["heure_fermeture"][:5], par_jour
-    except Exception:
-        logger.warning("Horaires de l'établissement indisponibles : horaires par défaut utilisés.")
+    except DjangoAPIError as exc:
+        if exc.status_code == 401:
+            raise  # session expirée : l'utilisateur doit se reconnecter
+        logger.warning("Horaires de l'établissement indisponibles (%s) : horaires par défaut utilisés.", exc.status_code)
+        return None
+    except (KeyError, TypeError, AttributeError):
+        logger.warning("Horaires de l'établissement au format inattendu : horaires par défaut utilisés.")
         return None
 
 

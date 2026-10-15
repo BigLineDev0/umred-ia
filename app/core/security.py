@@ -1,7 +1,8 @@
+import hmac
 from dataclasses import dataclass
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import settings
@@ -13,7 +14,7 @@ bearer_scheme = HTTPBearer()
 class Utilisateur:
     """
     Utilisateur authentifié, reconstruit à partir des claims du JWT émis par
-    Django (voir UmredTokenObtainPairSerializer.get_token).
+    Django (voir SenlabTokenObtainPairSerializer.get_token).
 
     On conserve aussi le token brut : il est RETRANSMIS tel quel à Django pour
     chaque appel métier. Ainsi ce sont les permissions Django (rôle,
@@ -79,3 +80,15 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_
         nom=payload.get("nom"),
         token=token,
     )
+
+
+def verifier_jeton_taches(x_taches_token: str = Header(default="")) -> None:
+    """
+    Routes appelées par le workflow n8n (sans utilisateur connecté) : elles
+    exigent l'en-tête X-Taches-Token égal au secret TACHES_TOKEN, partagé
+    avec Django. Sans secret configuré, elles sont désactivées.
+    """
+    attendu = settings.taches_token
+    # compare_digest : comparaison en temps constant.
+    if not attendu or not hmac.compare_digest(x_taches_token, attendu):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Jeton de tâche invalide.")

@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
     # l'assistant fonctionne avec les règles (mode dégradé), puis bascule
     # automatiquement sur le modèle une fois chargé. Les prompts système
     # fixes sont calculés pendant ce chargement (voir app/nlu/model.py).
-    prompts = [SYSTEM_PROMPT, CONVERSATION_SYSTEM_PROMPT, CONSIGNES]
+    prompts = [SYSTEM_PROMPT, CONSIGNES] + ([CONVERSATION_SYSTEM_PROMPT] if settings.conversation_libre else [])
     chargement = asyncio.create_task(asyncio.to_thread(charger_modele, prompts))
     yield
     chargement.cancel()

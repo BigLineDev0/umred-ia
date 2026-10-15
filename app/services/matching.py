@@ -88,3 +88,14 @@ def resoudre_equipement(texte: str, equipements: list[dict]) -> dict | None:
         ((*_score(texte_normalise, e), e) for e in equipements), key=lambda t: (t[0], t[1])
     )
     return equipement if niveau else None
+
+
+def version_actuelle(equipement: dict | None, equipements: list[dict]) -> dict | None:
+    """
+    Équipement retenu dans la conversation, relu dans la liste fraîche de
+    Django (son statut a pu changer : panne, maintenance). None s'il n'est
+    plus visible pour l'utilisateur.
+    """
+    if equipement is None:
+        return None
+    return next((e for e in equipements if e["id"] == equipement["id"]), None)

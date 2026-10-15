@@ -4,9 +4,13 @@ Seules les réservations actives et à venir de l'utilisateur sont
 proposées ; Django revérifie de toute façon que la réservation lui
 appartient avant d'annuler.
 """
+import re
+
 from rapidfuzz import fuzz
 
-from app.assistant.contexte import Contexte, est_non, est_oui, lire_choix, lire_numero, options_confirmation
+from app.assistant.contexte import (
+    Contexte, commence_par_oui_ou_non, est_non, est_oui, lire_choix, lire_numero, options_confirmation,
+)
 from app.assistant.formatage import (
     formater_creneau, formater_date, formater_date_titre, formater_heure, formater_plage,
 )
@@ -18,6 +22,23 @@ from app.services.reservations import reservations_actives_a_venir
 
 NOMBRE_MAX_CHOIX = 5
 MOTS_PROCHAINE = ("derniere", "prochaine", "plus proche", "plus recente")
+MOTS_TOUTES = ("toutes", "tous mes", "tout annuler", "l'ensemble")
+# « les réservations de Moussa » : un prénom (majuscule) après « réservation(s) de ».
+_RESERVATION_D_AUTRUI = re.compile(r"r[ée]servations?\s+(?:de|d['’])\s*([A-ZÀ-Ý][\w-]+)")
+MESSAGE_AUTRUI = ("Je ne peux agir que sur vos propres réservations, une à la fois et après votre confirmation. "
+                  "Pour la réservation d'une autre personne, adressez-vous à un technicien ou à un administrateur.")
+
+
+def _vise_autrui(ctx: Contexte, reservations: list[dict]) -> bool:
+    """« Annule les réservations de Moussa » : le nom cité n'est ni un équipement ni un laboratoire de l'utilisateur."""
+    correspondance = _RESERVATION_D_AUTRUI.search(ctx.message)
+    if not correspondance:
+        return False
+    nom = normaliser_texte(correspondance.group(1))
+    connus = {normaliser_texte(mot) for r in reservations
+              for texte in [*(r.get("equipements_noms") or []), r.get("laboratoire_nom") or ""] for mot in texte.split()}
+    return nom not in connus and nom not in {normaliser_texte(m) for m in ("demain", "lundi", "mardi", "mercredi", "jeudi",
+                                                                            "vendredi", "samedi", "dimanche")}
 
 
 def _filtrer_par_equipement(reservations: list[dict], texte_equipement: str) -> list[dict]:
@@ -31,8 +52,16 @@ def _filtrer_par_equipement(reservations: list[dict], texte_equipement: str) -> 
 async def gerer_annulation(ctx: Contexte) -> ChatResponse:
     ext = ctx.extraction
     actives = reservations_actives_a_venir(await get_reservations(ctx.token, a_venir=True))
+    if _vise_autrui(ctx, actives):
+        # Django refuserait de toute façon (seules ses propres réservations
+        # sont visibles) ; on le dit clairement au lieu de proposer les siennes.
+        return ChatResponse(type="denied", reponse=MESSAGE_AUTRUI)
     if not actives:
         return ChatResponse(reponse="Vous n'avez aucune réservation à venir à annuler.")
+    if contient_un(ctx.message_normalise, MOTS_TOUTES):
+        # Pas d'annulation groupée : chaque annulation est confirmée une à une.
+        return _proposer_choix(ctx, actives, "Je ne peux annuler qu'une réservation à la fois, après votre confirmation. "
+                                             "Laquelle souhaitez-vous annuler ?")
 
     candidats = actives
     if ext.date:
@@ -102,6 +131,11 @@ async def traiter_confirmation(ctx: Contexte) -> ChatResponse | None:
         terminer_etape(ctx.session)
         return ChatResponse(reponse="D'accord, je conserve votre réservation.")
     if not est_oui(ctx.message_normalise):
+        if commence_par_oui_ou_non(ctx.message_normalise):
+            # « Oui mais... » : on ne détruit rien sur une réponse ambiguë.
+            return ChatResponse(reponse="Je n'ai rien annulé. Répondez « oui » pour confirmer l'annulation de cette "
+                                        "réservation, ou « non » pour la conserver.",
+                                necessite_confirmation=True, options=options_confirmation())
         return None
 
     terminer_etape(ctx.session)

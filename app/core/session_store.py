@@ -11,6 +11,7 @@ Limites assumées pour la V1 : stockage en mémoire, donc perdu au
 redémarrage et propre à un seul processus. Le passage à Redis (une clé
 par session avec expiration) ne changerait que ce module.
 """
+import asyncio
 import time
 from collections import OrderedDict
 from enum import StrEnum
@@ -50,7 +51,12 @@ def _nouvelle_session() -> dict[str, Any]:
     # « memoire » survit à la fin d'une étape : elle retient le dernier
     # équipement et la dernière date évoqués, pour comprendre « réserve-le »
     # ou « et vendredi ? » au message suivant.
-    return {"etape": None, "contexte": {}, "historique": [], "memoire": {}, "derniere_activite": time.monotonic()}
+    # « verrou » : les messages d'une même conversation sont traités l'un
+    # après l'autre. Sans lui, un double clic sur « Oui, confirmer » (ou un
+    # renvoi après un délai dépassé) lisait deux fois l'étape « confirmation »
+    # et pouvait créer la réservation deux fois.
+    return {"etape": None, "contexte": {}, "historique": [], "memoire": {}, "derniere_activite": time.monotonic(),
+            "verrou": asyncio.Lock()}
 
 
 def _purger(maintenant: float) -> None:

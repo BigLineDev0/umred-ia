@@ -54,3 +54,16 @@ def test_indicateurs_incomplets_repli_sur_les_regles(monkeypatch):
     monkeypatch.setattr(synthese, "generer", generer_inutile)
     texte, source = asyncio.run(synthese.rediger_synthese({"synthese_regles": "Synthèse par règles."}))
     assert (texte, source) == ("Synthèse par règles.", "regles")
+
+
+def test_redaction_pour_n8n_exige_le_jeton(client, monkeypatch):
+    from app.core.config import settings
+    url = "/api/pilotage/synthese/rediger"
+    monkeypatch.setattr(settings, "taches_token", None)
+    assert client.post(url, json={"indicateurs": INDICATEURS}, headers={"X-Taches-Token": ""}).status_code == 403
+    monkeypatch.setattr(settings, "taches_token", "secret-de-test")
+    assert client.post(url, json={"indicateurs": INDICATEURS}, headers={"X-Taches-Token": "mauvais"}).status_code == 403
+    reponse = client.post(url, json={"indicateurs": INDICATEURS}, headers={"X-Taches-Token": "secret-de-test"})
+    assert reponse.status_code == 200
+    # Pas de modèle chargé pendant les tests : repli sur la version par gabarits.
+    assert reponse.json() == {"synthese": "Synthèse par règles.", "source": "regles", "periode": INDICATEURS["periode"]}

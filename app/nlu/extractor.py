@@ -13,6 +13,7 @@ modèle n'est jamais indispensable : s'il tombe, les règles suffisent.
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 
 from app.nlu.extraction import Extraction
 from app.nlu.intentions import Intention, affiner_intention, valider_intention
@@ -38,10 +39,15 @@ Intentions possibles :
 - creer_equipement : il veut ajouter un nouvel équipement au parc
 - naviguer : il veut ouvrir une page ou gérer une rubrique (équipements, laboratoires, utilisateurs, maintenances, rapports, journal)
 - motif_refus : il demande pourquoi une de ses réservations a été refusée
+- statut_demande : il demande où en est une demande en attente de validation
+- bilan : il veut un résumé chiffré de ses réservations sur une période
+- conseil_equipement : il cherche quel équipement convient à une analyse ou une manipulation
+- aide : il demande comment fonctionne la plateforme (réserver, annuler, validation, horaires)
+- remerciement : remerciement ou formule de fin, sans autre demande
 - mon_nom : il demande qui il est, son nom
 - identite : il demande qui tu es, ce que tu sais faire
 - salutation : simple salutation, sans autre demande
-- autre : tout le reste (question générale, remerciement, hors sujet...)
+- autre : tout le reste (question générale, hors sujet...)
 
 Règles :
 - Recopie la date telle qu'elle est écrite (« demain », « lundi prochain », « 28/09 »). N'invente jamais de date ni d'heure.
@@ -68,6 +74,10 @@ Message : Ajoute un équipement thermocycleur
 {{"intention": "creer_equipement", "equipement": "thermocycleur", "date": null, "heure_debut": null, "heure_fin": null}}
 Message : J'aimerais m'occuper des comptes des utilisateurs
 {{"intention": "naviguer", "equipement": null, "date": null, "heure_debut": null, "heure_fin": null}}
+Message : Ma demande pour le microscope a-t-elle été acceptée ?
+{{"intention": "statut_demande", "equipement": "microscope", "date": null, "heure_debut": null, "heure_fin": null}}
+Message : Quel appareil pour mesurer une absorbance ?
+{{"intention": "conseil_equipement", "equipement": null, "date": null, "heure_debut": null, "heure_fin": null}}
 
 Intentions autorisées : {", ".join(i.value for i in Intention)}."""
 
@@ -125,32 +135,50 @@ def fusionner(donnees_modele: dict, regles: Extraction, message: str) -> Extract
         heure_fin=heure_fin,
         periode=regles.periode,
         moment=regles.moment,
+        date_alternative=regles.date_alternative if date == regles.date else None,
     )
 
 
-def _regles_suffisent(regles: Extraction, reservation_en_cours: bool) -> bool:
+def _regles_suffisent(regles: Extraction, reservation_en_cours: bool, reprise_possible: bool = False) -> bool:
     """
-    Le modèle coûte cher (de quelques secondes à plusieurs minutes sur CPU) :
+    Le modèle coûte cher (mesuré : 7 à 11 s par appel sur un CPU 8 cœurs) :
     on ne le sollicite que si les règles n'ont PAS compris le message.
     - un mot-clé explicite a été trouvé (« réserve », « annule », « mes
       réservations »...) : les règles sont fiables, et l'équipement sera
       retrouvé par recherche floue sur le message complet ;
-    - l'utilisateur complète une réservation (« demain de 10h à 12h ») :
-      dates et heures sont justement le point fort des règles.
+    - l'utilisateur complète une réservation (« demain de 10h à 12h ») ou
+      relance la question précédente (« et jeudi après-midi ? ») : dates et
+      heures sont justement le point fort des règles, l'intention vient du
+      contexte de la conversation.
     """
     if regles.intention != Intention.AUTRE:
         return True
-    return reservation_en_cours and regles.a_des_informations_de_reservation
+    return (reservation_en_cours or reprise_possible) and regles.a_des_informations_de_reservation
 
 
-async def extraire(message: str, reservation_en_cours: bool = False) -> Extraction:
+async def extraire(
+    message: str,
+    reservation_en_cours: bool = False,
+    reprise_possible: bool = False,
+    pertinent: Callable[[], Awaitable[bool]] | None = None,
+) -> Extraction:
+    """
+    `pertinent` : test (asynchrone, évalué seulement si les règles n'ont pas
+    suffi) indiquant si le message peut concerner la plateforme. S'il
+    répond non (« Quelle est la capitale du Japon ? »), le modèle n'est pas
+    appelé : il ne pourrait rien en tirer d'utile et coûterait ~8 s.
+    """
     regles = extraire_par_regles(message)
-    if _regles_suffisent(regles, reservation_en_cours):
+    if _regles_suffisent(regles, reservation_en_cours, reprise_possible):
+        return regles
+    if pertinent is not None and not await pertinent():
         return regles
     try:
         reponse = await generer(
             [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": f"Message : {message}"}],
-            max_new_tokens=120,
+            # Le JSON attendu tient en ~50 tokens : la borne protège seulement
+            # d'une génération qui s'emballerait.
+            max_new_tokens=90,
         )
         return fusionner(extraire_json(reponse), regles, message)
     except ModeleIndisponible as exc:

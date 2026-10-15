@@ -8,11 +8,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.assistant.consultation import message_accueil
 from app.assistant.dialogue import traiter_message
+from app.core import metriques
+from app.core.config import settings
+from app.core.constantes import Role
 from app.core.rate_limit import limiter_debit
 from app.core.security import Utilisateur, get_current_user
 from app.core.session_store import ajouter_historique, cle_session, get_session
 from app.schemas.chat import ChatRequest, ChatResponse
-from app.services.django_client import DjangoAPIError
+from app.services.django_client import DjangoAPIError, portee_requete
 
 logger = logging.getLogger(__name__)
 
@@ -46,20 +49,29 @@ def _erreur_django(exc: DjangoAPIError) -> ChatResponse:
 async def chat(payload: ChatRequest, user: Utilisateur = Depends(limiter_debit)) -> ChatResponse:
     session = get_session(cle_session(user.id, payload.session_id))
     message = payload.message.strip()
-    try:
-        reponse = await traiter_message(user, session, message)
-    except DjangoAPIError as exc:
-        return _erreur_django(exc)
-    except HTTPException:
-        raise
-    except Exception:
-        # Filet de sécurité : l'utilisateur garde une conversation
-        # utilisable, et la trace complète part dans les logs.
-        logger.exception("Erreur inattendue pendant le traitement du message")
-        return ChatResponse(type="error", reponse=MESSAGE_ERREUR_INTERNE)
+    # Un message à la fois par conversation (voir session_store), mesure de
+    # la latence, cache des lectures Django limité à cette requête.
+    async with session["verrou"]:
+        with metriques.mesurer_requete() as mesure, portee_requete():
+            try:
+                reponse = await traiter_message(user, session, message)
+            except DjangoAPIError as exc:
+                mesure.erreur = f"django_{exc.status_code}"
+                return _erreur_django(exc)
+            except HTTPException:
+                raise
+            except Exception:
+                # Filet de sécurité : l'utilisateur garde une conversation
+                # utilisable, et la trace complète part dans les logs.
+                mesure.erreur = "interne"
+                logger.exception("Erreur inattendue pendant le traitement du message")
+                return ChatResponse(type="error", reponse=MESSAGE_ERREUR_INTERNE)
 
-    ajouter_historique(session, message, reponse.reponse)
-    return reponse
+        # Le texte des échanges ne sert qu'à la conversation libre : sans
+        # elle, rien n'est conservé (minimisation des données).
+        if settings.conversation_libre:
+            ajouter_historique(session, message, reponse.reponse)
+        return reponse
 
 
 @router.get("/chat/accueil", response_model=ChatResponse)
@@ -68,3 +80,15 @@ async def accueil(user: Utilisateur = Depends(get_current_user)) -> ChatResponse
         return await message_accueil(user)
     except DjangoAPIError as exc:
         return _erreur_django(exc)
+
+
+@router.get("/metriques")
+async def metriques_assistant(user: Utilisateur = Depends(get_current_user)) -> dict:
+    """
+    Latence de l'assistant sur les dernières requêtes (médiane, 95e
+    percentile, appels au modèle, erreurs). Aucune donnée personnelle ;
+    réservé aux administrateurs.
+    """
+    if user.role not in (Role.ADMIN, Role.SUPER_ADMIN):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Réservé aux administrateurs.")
+    return metriques.statistiques()

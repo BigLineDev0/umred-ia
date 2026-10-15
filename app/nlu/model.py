@@ -25,6 +25,7 @@ import threading
 from typing import Any
 
 from app.core.config import settings
+from app.core.metriques import chronometrer, noter, noter_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,9 @@ def _generer_sync(messages: list[dict[str, str]], options: dict[str, Any]) -> st
             pad_token_id=_tokenizer.eos_token_id,
             **options,
         )
-    return _tokenizer.decode(sortie[0, ids.shape[1]:], skip_special_tokens=True)
+    generes = sortie[0, ids.shape[1]:]
+    noter_tokens(int(generes.shape[0]))
+    return _tokenizer.decode(generes, skip_special_tokens=True)
 
 
 async def generer(
@@ -145,8 +148,14 @@ async def generer(
     try:
         await asyncio.wait_for(_verrou.acquire(), timeout=settings.model_queue_timeout)
     except TimeoutError:
+        noter(erreur="file_modele_saturee")
         raise ModeleIndisponible("File d'attente du modèle saturée.")
-    try:
-        return await asyncio.to_thread(_generer_sync, messages, options)
-    finally:
-        _verrou.release()
+    noter(chemin="modele")
+    # Le verrou n'est rendu qu'à la FIN du calcul, même si la requête est
+    # abandonnée entre-temps (client déconnecté) : un thread ne peut pas
+    # être interrompu, et relâcher le verrou plus tôt lancerait une
+    # deuxième génération en parallèle sur le même modèle.
+    tache = asyncio.ensure_future(asyncio.to_thread(_generer_sync, messages, options))
+    tache.add_done_callback(lambda _: _verrou.release())
+    with chronometrer("llm"):
+        return await asyncio.shield(tache)

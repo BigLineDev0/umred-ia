@@ -9,9 +9,11 @@ Elle joue deux rôles :
 """
 import re
 
+from app.core import temps
 from app.nlu.extraction import Extraction
+from app.nlu.fautes import corriger_dates
 from app.nlu.intentions import intention_par_mots_cles
-from app.nlu.normalisation import ajouter_minutes, normaliser_date
+from app.nlu.normalisation import ajouter_minutes, date_alternative, normaliser_date
 from app.nlu.texte import normaliser_texte
 
 _NOMBRES_EN_LETTRES = {"une": 1, "un": 1, "deux": 2, "trois": 3, "quatre": 4, "cinq": 5, "six": 6}
@@ -42,6 +44,11 @@ _DATE = re.compile(
 )
 
 
+_APRES_MIDI = re.compile(r"apr[eè]s[- ]?midi")
+# « ce matin », « cet après-midi », « ce soir » : le moment est AUJOURD'HUI.
+_MOMENT_DU_JOUR = re.compile(r"\b(?:ce matin|cet? apres[- ]?midi|cet aprem|ce soir)\b")
+
+
 def _heure(heures: str, minutes: str | None) -> str:
     return f"{int(heures):02d}:{minutes or '00'}"
 
@@ -64,7 +71,9 @@ def extraire_heures(message: str) -> tuple[str | None, str | None]:
     La durée est retirée du texte AVANT la recherche des heures, sinon
     « pendant 2h » serait lu comme « 02:00 ».
     """
-    texte = message.lower().replace("midi", "12h")
+    # « après-midi » est un moment de la journée, pas l'heure « midi » : sans
+    # ce retrait, « vendredi après-midi » devenait « vendredi à partir de 12h ».
+    texte = _APRES_MIDI.sub(" aprem ", message.lower()).replace("midi", "12h")
     duree = _extraire_duree_minutes(texte)
     texte = _DUREE.sub(" ", texte)
 
@@ -88,12 +97,18 @@ def extraire_heures(message: str) -> tuple[str | None, str | None]:
     return debut, fin
 
 
-def extraire_date(message: str) -> str | None:
+def _expression_date(message: str) -> str | None:
     correspondance = _DATE.search(message.lower())
-    if not correspondance:
-        return None
-    expression = re.sub(r"^le\s+", "", correspondance.group(1))
-    return normaliser_date(expression)
+    return re.sub(r"^le\s+", "", correspondance.group(1)) if correspondance else None
+
+
+def extraire_date(message: str) -> str | None:
+    expression = _expression_date(message)
+    if expression:
+        return normaliser_date(expression)
+    if _MOMENT_DU_JOUR.search(normaliser_texte(message)):
+        return temps.aujourd_hui().isoformat()
+    return None
 
 
 def extraire_periode(message_normalise: str) -> str:
@@ -101,6 +116,8 @@ def extraire_periode(message_normalise: str) -> str:
         return "debut_semaine"
     if "semaine prochaine" in message_normalise:
         return "semaine_prochaine"
+    if "semaine derniere" in message_normalise or "semaine passee" in message_normalise:
+        return "semaine_derniere"
     return "semaine" if "semaine" in message_normalise else "jour"
 
 
@@ -159,9 +176,10 @@ def _graphie_originale(fragment: str | None, message: str, message_normalise: st
 
 
 def extraire_par_regles(message: str) -> Extraction:
-    message = message.strip()
+    message = corriger_dates(message.strip())
     message_normalise = normaliser_texte(message)
     heure_debut, heure_fin = extraire_heures(message)
+    expression = _expression_date(message)
     return Extraction(
         intention=intention_par_mots_cles(message_normalise),
         # Seul le nom cité après « réserver » est isolé ; sinon la recherche
@@ -172,4 +190,5 @@ def extraire_par_regles(message: str) -> Extraction:
         heure_fin=heure_fin,
         periode=extraire_periode(message_normalise),
         moment=extraire_moment(message_normalise),
+        date_alternative=date_alternative(expression) if expression else None,
     )

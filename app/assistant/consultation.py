@@ -6,19 +6,21 @@ from rapidfuzz import fuzz
 from app.assistant.contexte import Contexte
 from app.assistant.formatage import accorder, formater_date, formater_heure, formater_plage, resume_reservation
 from app.assistant.navigation import action_page, actions_pages
+from app.assistant.aide import REPONSE_HORS_PERIMETRE
 from app.core import temps
+from app.core.config import settings
 from app.core.constantes import (
     LABELS_ROLE, LABELS_STATUT_RESERVATION, ROLES_VUE_GLOBALE, STATUT_MAINTENANCE_PLANIFIEE,
     STATUTS_EQUIPEMENT_NON_RESERVABLES, Role,
 )
 from app.core.security import Utilisateur
 from app.nlu.conversation import MESSAGE_AIDE, REPONSE_REPLI, repondre_conversationnel
-from app.nlu.domaine import concerne_le_labo
+from app.nlu.domaine import concerne_le_labo, peut_concerner_la_plateforme
 from app.nlu.texte import contient_un, normaliser_texte
 from app.schemas.chat import ChatAction, ChatOption, ChatResponse
 from app.services.disponibilite import bornes_semaine
 from app.services.django_client import get_equipements, get_maintenances, get_reservations
-from app.services.matching import resoudre_equipement
+from app.services.matching import resoudre_equipement, version_actuelle
 from app.services.reservations import apercu_du_jour, reservations_actives_a_venir
 
 NOMBRE_MAX_RESERVATIONS_AFFICHEES = 5
@@ -56,13 +58,25 @@ SUGGESTIONS_AIDE = [
 ]
 
 
+async def remercier(ctx: Contexte) -> ChatResponse:
+    return ChatResponse(reponse="Avec plaisir. N'hésitez pas si vous avez besoin d'autre chose.")
+
+
 async def repondre_autre(ctx: Contexte) -> ChatResponse:
     # Le message parle du labo sans être une commande reconnue : on montre
     # l'aide plutôt que de laisser le modèle improviser une procédure.
-    if concerne_le_labo(ctx.message):
-        return ChatResponse(reponse=f"Je ne suis pas certain de bien comprendre. {MESSAGE_AIDE}",
+    # Même règle pour un message qui POURRAIT viser la plateforme (première
+    # personne, date, équipement) : en mode dégradé (modèle indisponible),
+    # « Il me faut la centrifugeuse demain » ne doit pas être déclaré hors sujet.
+    ext = ctx.extraction
+    if (concerne_le_labo(ctx.message) or peut_concerner_la_plateforme(ctx.message)
+            or (ext is not None and ext.a_des_informations_de_reservation)):
+        return ChatResponse(type="clarification", reponse=f"Je ne suis pas certain de bien comprendre. {MESSAGE_AIDE}",
                             options=SUGGESTIONS_AIDE,
                             actions=actions_pages(ctx.user.role, "reservation_formulaire", "mes_reservations"))
+    if not settings.conversation_libre:
+        # Hors périmètre : réponse fixe et immédiate (voir config.conversation_libre).
+        return ChatResponse(reponse=REPONSE_HORS_PERIMETRE, options=SUGGESTIONS_AIDE)
     reponse = await repondre_conversationnel(ctx.message, ctx.session["historique"])
     # Sans modèle, la réponse est l'aide statique : on y joint les réponses rapides.
     return ChatResponse(reponse=reponse, options=SUGGESTIONS_AIDE if reponse == REPONSE_REPLI else None)
@@ -145,7 +159,7 @@ async def expliquer_refus(ctx: Contexte) -> ChatResponse:
 
 async def prochaine_maintenance(ctx: Contexte) -> ChatResponse:
     equipements = await get_equipements(ctx.token)
-    equipement = resoudre_equipement(ctx.extraction.equipement or ctx.message, equipements)
+    equipement = resoudre_equipement(ctx.extraction.equipement or ctx.message, equipements) or version_actuelle(ctx.equipement_du_contexte, equipements)
     if not equipement:
         return ChatResponse(type="clarification",
                             reponse="Sur quel équipement souhaitez-vous connaître la prochaine maintenance ? "
@@ -185,6 +199,20 @@ async def statistiques(ctx: Contexte) -> ChatResponse:
         portee = "au total" if ctx.user.role == Role.ADMIN else "vous concernant ou en attente de prise en charge"
         return ChatResponse(type="statistics", reponse=f"{accorder(len(maintenances), 'intervention')} de maintenance {portee}.",
                             data={"maintenances": len(maintenances)}, actions=actions_pages(ctx.user.role, "maintenances"))
+
+    if "panne" in message or "hors service" in message:
+        # « Combien d'équipements sont en panne ? » : décompte réel par statut.
+        equipements = await get_equipements(ctx.token)
+        en_panne = [e for e in equipements if e.get("statut") == "EN_PANNE"]
+        hors_service = [e for e in equipements if e.get("statut") == "HORS_SERVICE"]
+        reponse = f"{accorder(len(en_panne), 'équipement')} actuellement en panne"
+        if en_panne:
+            reponse += f" : {', '.join(e['nom'] for e in en_panne[:5])}{'…' if len(en_panne) > 5 else ''}"
+        if hors_service:
+            reponse += f" ; {accorder(len(hors_service), 'équipement')} hors service"
+        return ChatResponse(type="statistics", reponse=reponse + ".",
+                            data={"en_panne": len(en_panne), "hors_service": len(hors_service)},
+                            actions=actions_pages(ctx.user.role, "pannes", "equipements"))
 
     if "equipement" in message:
         equipements = await get_equipements(ctx.token)

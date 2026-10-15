@@ -31,6 +31,18 @@ class Settings(BaseSettings):
     # Temps maximal d'attente d'un créneau d'inférence avant de basculer
     # sur l'extraction par règles (le modèle traite une requête à la fois).
     model_queue_timeout: float = 20.0
+    # Réponse rédigée librement par le modèle aux messages hors commande.
+    # Désactivée par défaut : mesuré sur Qwen2.5-1.5B, elle coûtait ~10 s
+    # et répondait à des questions hors sujet (« La capitale du Japon est
+    # Tokyo ») malgré les consignes. Les questions sur la plateforme ont des
+    # réponses déterministes (app/assistant/aide.py).
+    conversation_libre: bool = False
+
+    # --- Tâches planifiées (n8n) ---
+    # Même secret que TACHES_TOKEN côté Django : il autorise le workflow n8n
+    # à demander la rédaction de la synthèse hebdomadaire sans compte
+    # utilisateur. Absent : la route correspondante répond 403.
+    taches_token: str | None = None
 
     # --- HTTP ---
     cors_origins: list[str] = ["http://localhost:4200"]
@@ -45,7 +57,7 @@ class Settings(BaseSettings):
     session_ttl_minutes: int = 30
     session_max: int = 5000
 
-    @field_validator("huggingface_api_key")
+    @field_validator("huggingface_api_key", "taches_token")
     @classmethod
     def _cle_vide_ignoree(cls, valeur: str | None) -> str | None:
         # « HUGGINGFACE_API_KEY= » (vide, comme dans .env.example) donnait un

@@ -3,7 +3,7 @@ from pydantic import BaseModel
 
 from app.assistant.synthese import rediger_synthese
 from app.core.rate_limit import limiter_debit
-from app.core.security import Utilisateur
+from app.core.security import Utilisateur, verifier_jeton_taches
 from app.services.django_client import DjangoAPIError, get_indicateurs
 
 router = APIRouter()
@@ -33,3 +33,21 @@ async def synthese(
 
     texte, source = await rediger_synthese(indicateurs)
     return SyntheseResponse(synthese=texte, source=source, periode=indicateurs.get("periode") or {})
+
+
+class RedactionRequest(BaseModel):
+    indicateurs: dict
+
+
+@router.post("/pilotage/synthese/rediger", response_model=SyntheseResponse,
+             dependencies=[Depends(verifier_jeton_taches)])
+async def rediger(corps: RedactionRequest) -> SyntheseResponse:
+    """
+    Synthèse hebdomadaire envoyée par n8n : les indicateurs viennent de
+    Django (/api/taches/synthese-hebdomadaire/), ce service se contente de
+    les rédiger, avec le même contrôle des chiffres et le même repli sur
+    les gabarits que la page « Aide à la décision ».
+    """
+    texte, source = await rediger_synthese(corps.indicateurs)
+    periode = corps.indicateurs.get("periode")
+    return SyntheseResponse(synthese=texte, source=source, periode=periode if isinstance(periode, dict) else {})

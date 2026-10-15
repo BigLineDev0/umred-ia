@@ -53,7 +53,7 @@ def test_normaliser_heure(brut, attendu):
     ("Quelles sont mes réservations ?", Intention.CONSULTER_MES_RESERVATIONS),  # et non « reserver »
     ("Annule ma réservation de demain", Intention.ANNULER),
     ("reserver le microscope", Intention.RESERVER),  # sans accent
-    ("Comment faire une réservation ?", Intention.AUTRE),
+    ("Comment faire une réservation ?", Intention.AIDE),  # question de fonctionnement : FAQ, pas une action
     ("Combien de réservations ce mois-ci ?", Intention.STATISTIQUES),
     ("le microscope est dispo demain ?", Intention.CONSULTER_DISPONIBILITE),
     ("bonjour", Intention.SALUTATION),

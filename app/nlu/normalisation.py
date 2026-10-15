@@ -60,6 +60,25 @@ def _date_relative(expression: str, aujourd_hui: date) -> date | None:
     return None
 
 
+def date_alternative(expression: str, aujourd_hui: date | None = None) -> str | None:
+    """
+    « vendredi prochain » dit un jeudi : demain, ou le vendredi de la semaine
+    suivante ? Les deux lectures sont courantes. On garde la plus proche
+    (comportement de _date_relative) et on renvoie l'autre, pour que
+    l'assistant signale l'ambiguïté au lieu de trancher en silence.
+    None quand l'expression n'est pas ambiguë.
+    """
+    texte = normaliser_texte(expression)
+    if not texte.endswith(" prochain") or texte.removesuffix(" prochain") not in JOURS_SEMAINE:
+        return None
+    aujourd_hui = aujourd_hui or temps.aujourd_hui()
+    retenue = _date_relative(texte, aujourd_hui)
+    # La date retenue tombe encore dans la semaine en cours : ambiguïté.
+    if retenue is None or retenue.isocalendar()[1] != aujourd_hui.isocalendar()[1]:
+        return None
+    return (retenue + timedelta(days=7)).isoformat()
+
+
 def normaliser_date(date_brute: str | None, aujourd_hui: date | None = None) -> str | None:
     """
     Convertit une expression de date (« demain », « vendredi prochain »,

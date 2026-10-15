@@ -21,7 +21,7 @@ from app.services.disponibilite import (
     LIBELLES_MOMENTS, calculer_creneaux_libres, enveloppe, est_ferme, fenetre_moment, jours_de_la_periode, restreindre,
 )
 from app.services.django_client import get_creneaux_occupes, get_equipements, verifier_reservation
-from app.services.matching import resoudre_equipement
+from app.services.matching import resoudre_equipement, version_actuelle
 
 NOMBRE_MAX_EQUIPEMENTS_AFFICHES = 8  # au-delà, la réponse devient illisible dans une bulle de chat
 APPELS_DJANGO_SIMULTANES = 5          # parallélisme borné pour ne pas saturer Django
@@ -39,9 +39,14 @@ def _libelle_jour(horaires: dict, jour_iso: str, creneaux: list[tuple[str, str]]
 async def consulter_disponibilite(ctx: Contexte) -> ChatResponse:
     ext = ctx.extraction
     equipements = await get_equipements(ctx.token)
-    equipement = resoudre_equipement(ext.equipement or ctx.message, equipements)
+    # « Et le lendemain, il est disponible ? » : aucun équipement cité, on
+    # reprend celui de la question précédente.
+    equipement = resoudre_equipement(ext.equipement or ctx.message, equipements) or version_actuelle(ctx.equipement_du_contexte, equipements)
     if equipement:
-        memoriser(ctx.session, equipement=equipement, date=ext.date)
+        # La date effectivement consultée (aujourd'hui par défaut) : elle sert
+        # de référence à « le lendemain » au message suivant.
+        jour_consulte = ext.date or (temps.aujourd_hui().isoformat() if ext.periode == "jour" else None)
+        memoriser(ctx.session, equipement=equipement, date=jour_consulte)
         if ext.date and ext.heure_debut and ext.heure_fin:
             return await _verifier_creneau_precis(ctx, equipement)
         return await _disponibilites_equipement(ctx, equipement)

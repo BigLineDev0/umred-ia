@@ -147,7 +147,9 @@ PAGES: list[Page] = [
         Role.ADMIN: "/admin/reservations", Role.TECHNICIEN: "/technicien/reservations",
         Role.CHERCHEUR: "/enseignant/reservations", Role.ETUDIANT: "/etudiant/mes-demandes",
     }, "Retrouvez toutes vos réservations sur cette page.",
-         objets=("page mes reservations", "toutes mes reservations", "historique de mes reservations")),
+         objets=("page mes reservations", "toutes mes reservations", "historique de mes reservations"),
+         # « Annule toutes mes réservations » est une annulation, pas une navigation.
+         exclusions=("annul", "supprim")),
 ]
 
 PAGES_PAR_CLE: dict[str, Page] = {p.cle: p for p in PAGES}
