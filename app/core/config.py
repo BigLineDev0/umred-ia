@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     # --- JWT ---
     # Doit être STRICTEMENT identique à la clé qui signe les tokens côté
-    # Django (SIMPLE_JWT n'ayant pas de SIGNING_KEY, c'est SECRET_KEY).
+    # Django : JWT_SIGNING_KEY si elle y est définie, sinon SECRET_KEY.
     # FastAPI ne délivre aucun token : il vérifie seulement ceux de Django.
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
